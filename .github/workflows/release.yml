@@ -3,7 +3,6 @@ name: Android Release
 on:
   push:
     tags:
-      - "v*.*.*"
       - "*.*.*"
 
 jobs:
@@ -33,16 +32,16 @@ jobs:
       - name: Build APK (split per ABI)
         env:
           PRIVATELM_ALLOW_DEBUG_RELEASE_SIGNING: "true"
-        run: flutter build apk --release --split-per-abi --obfuscate --split-debug-info=./debug-info/
+        run: flutter build apk --release --split-per-abi
 
-      - name: Upload APK artifacts
+      - name: Upload APK artifacts (arm64-v8a)
         uses: actions/upload-artifact@v4
         with:
-          name: privatelm-apk-${{ github.ref_name }}
-          path: build/app/outputs/flutter-apk/app-*/*.apk
+          name: privatelm-apk-arm64-${{ github.ref_name }}
+          path: build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
 
-      - name: Upload debug-info
+      - name: Upload APK artifacts (armeabi-v7a)
         uses: actions/upload-artifact@v4
         with:
-          name: privatelm-debug-info-${{ github.ref_name }}
-          path: debug-info/
+          name: privatelm-apk-armeabi-${{ github.ref_name }}
+          path: build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
