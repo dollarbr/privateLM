@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
+import '../core/colors.dart';
 import '../core/constants.dart';
 import '../services/hive_service.dart';
 import '../services/app_log_service.dart';
@@ -659,6 +660,190 @@ class SettingsController extends GetxController {
   Future<void> setContextSize(int value) async {
     contextSize.value = value;
     await _hive.setSetting(AppConstants.keyContextSize, value);
+  }
+
+  /// Maximum value allowed for manual Max Tokens entry.
+  static const maxManualMaxTokens = 4096;
+
+  /// Threshold above which a memory warning is shown for Context Size.
+  static const contextSizeMemoryWarningThreshold = 8192;
+
+  /// Maximum value allowed for manual Context Size entry.
+  static const maxManualContextSize = 16384;
+
+  /// Shows a manual-entry dialog for Max Tokens or Context Size.
+  /// [field] must be either 'maxTokens' or 'contextSize'.
+  /// Returns the validated value (already applied), or null if cancelled.
+  static Future<int?> showManualEntryDialog({
+    required BuildContext context,
+    required String field,
+    required String label,
+    required int currentValue,
+    required int min,
+    required int max,
+    int? warningThreshold,
+    String? warningMessage,
+    required SettingsController controller,
+    required VoidCallback onApplied,
+  }) async {
+    final isMaxTokens = field == 'maxTokens';
+    final textController =
+        TextEditingController(text: currentValue.toString());
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    return showDialog<int>(
+      context: context,
+      barrierDismissible: true,
+      builder: (dialogContext) => Obx(() {
+        final parsed = int.tryParse(textController.text);
+        final isOverThreshold = warningThreshold != null &&
+            parsed != null &&
+            parsed > warningThreshold;
+
+        return AlertDialog(
+          backgroundColor:
+              isDark ? const Color(0xFF1C1C1E) : Colors.white,
+          shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16)),
+          title: Row(
+            children: [
+              Icon(
+                isMaxTokens
+                    ? Icons.tag_rounded
+                    : Icons.memory_rounded,
+                size: 20,
+                color: isDark
+                    ? const Color(0xFF0A84FF)
+                    : const Color(0xFF007AFF),
+              ),
+              const SizedBox(width: 10),
+              Text(label,
+                  style: TextStyle(
+                      color: isDark ? Colors.white : Colors.black,
+                      fontWeight: FontWeight.w600)),
+            ],
+          ),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Enter a value between $min and $max',
+                  style: TextStyle(
+                      fontSize: 13,
+                      color: isDark
+                          ? Colors.white70
+                          : Colors.black87),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: textController,
+                  keyboardType:
+                      const TextInputType.numberWithOptions(
+                          signed: false, decimal: false),
+                  inputFormatters: [
+                    FilteringTextInputFormatter.digitsOnly,
+                  ],
+                  style: TextStyle(
+                      color: isDark ? Colors.white : Colors.black),
+                  decoration: InputDecoration(
+                    hintText: currentValue.toString(),
+                    hintStyle: TextStyle(
+                        color: isDark
+                            ? Colors.white24
+                            : Colors.black26),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(
+                          color: isDark
+                              ? Colors.white.withValues(alpha: 0.12)
+                              : Colors.black
+                                  .withValues(alpha: 0.12)),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(
+                          color: isDark
+                              ? const Color(0xFF0A84FF)
+                              : const Color(0xFF007AFF)),
+                    ),
+                  ),
+                ),
+                if (isOverThreshold) ...[
+                  const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 10),
+                    decoration: BoxDecoration(
+                      color:
+                          AppColors.warning.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Icon(
+                          Icons.warning_amber_rounded,
+                          size: 16,
+                          color: AppColors.warning,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            warningMessage ?? 'Value above recommended safe limit may cause issues.',
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: AppColors.warning,
+                              fontWeight: FontWeight.w400,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: Text('Cancel',
+                  style: TextStyle(
+                      color: isDark
+                          ? Colors.white.withValues(alpha: 0.6)
+                          : Colors.black87)),
+            ),
+            FilledButton(
+              onPressed: () {
+                final v = int.tryParse(textController.text);
+                if (v == null || v < min || v > max) return;
+                Navigator.of(dialogContext).pop(v);
+              },
+              style: FilledButton.styleFrom(
+                backgroundColor: isDark
+                    ? const Color(0xFF0A84FF)
+                    : const Color(0xFF007AFF),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10)),
+              ),
+              child: const Text('Save'),
+            ),
+          ],
+        );
+      }),
+    ).then((value) {
+      if (value != null) {
+        if (isMaxTokens) {
+          controller.setMaxTokens(value);
+        } else {
+          controller.setContextSize(value);
+        }
+        onApplied();
+      }
+      return value;
+    });
   }
 
   Future<void> setLiteRtPerformanceMode(String mode) async {

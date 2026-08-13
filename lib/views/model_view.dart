@@ -2197,7 +2197,7 @@ class ModelView extends GetView<ModelController> {
     );
   }
 
-  Future<void> _confirmDeleteModel(
+  Future<bool> _confirmDeleteModel(
       BuildContext context, String filename) async {
     final confirmed = await showDialog<bool>(
           context: context,
@@ -2222,6 +2222,178 @@ class ModelView extends GetView<ModelController> {
         ) ??
         false;
     if (confirmed) await controller.deleteModel(filename);
+    return confirmed;
+  }
+
+  /// Shows a bottom sheet to edit a custom model's metadata.
+  void _showEditModelSheet(BuildContext context, AiModel model) {
+    final controller = Get.find<ModelController>();
+    final nameController = TextEditingController(text: model.name);
+    final urlController = TextEditingController(text: model.url);
+    final descController = TextEditingController(text: model.description);
+    final templateController = TextEditingController(text: model.template);
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Theme.of(context).bottomSheetTheme.backgroundColor,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(20),
+        ),
+      ),
+      builder: (sheetContext) => Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.of(sheetContext).viewInsets.bottom,
+          left: 16,
+          right: 16,
+          top: 20,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.edit_rounded,
+                  size: 20,
+                  color: Theme.of(sheetContext).colorScheme.primary,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  'Edit Model',
+                  style: GoogleFonts.inter(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                    color: Theme.of(sheetContext).colorScheme.onSurface,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            _buildTextField(
+              context,
+              controller: nameController,
+              label: 'Name',
+              hint: 'Enter model name',
+            ),
+            const SizedBox(height: 12),
+            _buildTextField(
+              context,
+              controller: urlController,
+              label: 'URL',
+              hint: 'Enter model URL',
+            ),
+            const SizedBox(height: 12),
+            _buildTextField(
+              context,
+              controller: descController,
+              label: 'Description',
+              hint: 'Enter description',
+              maxLines: 3,
+            ),
+            const SizedBox(height: 12),
+            _buildTextField(
+              context,
+              controller: templateController,
+              label: 'Template',
+              hint: 'e.g. chatml',
+            ),
+            const SizedBox(height: 20),
+            Row(
+              children: [
+                Expanded(
+                  child: TextButton(
+                    onPressed: () => Navigator.of(sheetContext).pop(),
+                    child: Text('Cancel',
+                        style: TextStyle(
+                            color: Theme.of(sheetContext).hintColor)),
+                  ),
+                ),
+                Expanded(
+                  child: FilledButton(
+                    onPressed: () {
+                      final updated = model.copyWith(
+                        name: nameController.text.trim().isEmpty
+                            ? model.name
+                            : nameController.text.trim(),
+                        url: urlController.text.trim().isEmpty
+                            ? model.url
+                            : urlController.text.trim(),
+                        description: descController.text.trim().isEmpty
+                            ? model.description
+                            : descController.text.trim(),
+                        template: templateController.text.trim().isEmpty
+                            ? model.template
+                            : templateController.text.trim(),
+                      );
+                      controller.updateCustomModel(updated);
+                      Navigator.of(sheetContext).pop();
+                    },
+                    style: FilledButton.styleFrom(
+                      backgroundColor: Theme.of(sheetContext)
+                          .colorScheme
+                          .primary,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    child: const Text('Save'),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTextField(
+    BuildContext context, {
+    required TextEditingController controller,
+    required String label,
+    required String hint,
+    int maxLines = 1,
+  }) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return TextField(
+      controller: controller,
+      maxLines: maxLines,
+      style: TextStyle(
+        color: isDark ? Colors.white : Colors.black,
+      ),
+      decoration: InputDecoration(
+        labelText: label,
+        hintText: hint,
+        hintStyle: TextStyle(
+          color: isDark ? Colors.white24 : Colors.black26,
+        ),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(
+            color: isDark
+                ? Colors.white.withValues(alpha: 0.12)
+                : Colors.black.withValues(alpha: 0.12),
+          ),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(
+            color: isDark
+                ? const Color(0xFF0A84FF)
+                : const Color(0xFF007AFF),
+          ),
+        ),
+        labelStyle: TextStyle(
+          color: isDark ? Colors.white70 : Colors.black87,
+        ),
+      ),
+      keyboardType:
+          maxLines > 1 ? TextInputType.multiline : TextInputType.text,
+    );
   }
 
   Widget _buildModelCard(BuildContext context, AiModel model) {
@@ -2248,158 +2420,183 @@ class ModelView extends GetView<ModelController> {
           .clamp(0.0, 100.0)
           .toStringAsFixed(0);
 
-      return Card(
-        margin: const EdgeInsets.only(bottom: 12),
-        elevation: 0,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-          side: BorderSide(
-            color: isActive
-                ? AppColors.primary.withValues(alpha: 0.5)
-                : Theme.of(context).dividerColor.withValues(alpha: 0.4),
+      return Dismissible(
+        key: ValueKey(model.filename),
+        direction: DismissDirection.horizontal,
+        confirmDismiss: (direction) async {
+          if (direction == DismissDirection.startToEnd) {
+            // Left-to-right: edit model
+            _showEditModelSheet(context, model);
+            return false;
+          } else {
+            // Right-to-left: delete model
+            return await _confirmDeleteModel(
+                context, model.filename);
+          }
+        },
+        onDismissed: (direction) {
+          // Deletion is handled in confirmDismiss via _confirmDeleteModel.
+          // This fires after the dismiss animation completes.
+        },
+        child: Card(
+          margin: const EdgeInsets.only(bottom: 12),
+          elevation: 0,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: BorderSide(
+              color: isActive
+                  ? AppColors.primary.withValues(alpha: 0.5)
+                  : Theme.of(context).dividerColor.withValues(alpha: 0.4),
+            ),
           ),
-        ),
-        color: isActive
-            ? AppColors.primary.withValues(alpha: 0.05)
-            : Theme.of(context).cardColor,
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          model.name,
-                          style: GoogleFonts.inter(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w700,
-                            color: Theme.of(context).colorScheme.onSurface,
+          color: isActive
+              ? AppColors.primary.withValues(alpha: 0.05)
+              : Theme.of(context).cardColor,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            model.name,
+                            style: GoogleFonts.inter(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w700,
+                              color:
+                                  Theme.of(context).colorScheme.onSurface,
+                            ),
                           ),
-                        ),
-                        const SizedBox(height: 6),
-                        _buildModelBadges(context, model),
-                        const SizedBox(height: 6),
-                        Text(
-                          model.description,
-                          style: GoogleFonts.inter(
-                            fontSize: 13,
-                            color:
-                                Theme.of(context).textTheme.bodyMedium?.color ??
-                                    Colors.grey,
+                          const SizedBox(height: 6),
+                          _buildModelBadges(context, model),
+                          const SizedBox(height: 6),
+                          Text(
+                            model.description,
+                            style: GoogleFonts.inter(
+                              fontSize: 13,
+                              color: Theme.of(context)
+                                      .textTheme
+                                      .bodyMedium
+                                      ?.color ??
+                                  Colors.grey,
+                            ),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
                           ),
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        const SizedBox(height: 6),
-                        Text(
-                          controller.modelSizeLabel(model),
-                          style: GoogleFonts.inter(
-                            fontSize: 12,
-                            color: Theme.of(context).hintColor,
-                            fontWeight: FontWeight.w600,
+                          const SizedBox(height: 6),
+                          Text(
+                            controller.modelSizeLabel(model),
+                            style: GoogleFonts.inter(
+                              fontSize: 12,
+                              color: Theme.of(context).hintColor,
+                              fontWeight: FontWeight.w600,
+                            ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 16),
-                  if (!isCurrentlyDownloading)
-                    Column(
-                      mainAxisAlignment: MainAxisAlignment.start,
-                      children: [
-                        if (isDownloaded) ...[
-                          FilledButton.tonal(
-                            onPressed: isActive || disableActions
-                                ? null
-                                : () => controller.loadModel(model.filename),
-                            style: FilledButton.styleFrom(
-                              backgroundColor: isActive
-                                  ? AppColors.success.withValues(alpha: 0.2)
-                                  : null,
-                              foregroundColor:
-                                  isActive ? AppColors.success : null,
-                              padding:
-                                  const EdgeInsets.symmetric(horizontal: 16),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(20),
+                    const SizedBox(width: 16),
+                    if (!isCurrentlyDownloading)
+                      Column(
+                        mainAxisAlignment: MainAxisAlignment.start,
+                        children: [
+                          if (isDownloaded) ...[
+                            FilledButton.tonal(
+                              onPressed: isActive || disableActions
+                                  ? null
+                                  : () => controller.loadModel(model.filename),
+                              style: FilledButton.styleFrom(
+                                backgroundColor: isActive
+                                    ? AppColors.success
+                                        .withValues(alpha: 0.2)
+                                    : null,
+                                foregroundColor:
+                                    isActive ? AppColors.success : null,
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 16),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(20),
+                                ),
+                              ),
+                              child: Text(
+                                isThisImageModelLoading
+                                    ? 'Loading...'
+                                    : isThisTextModelLoading
+                                        ? '$loadPercent%'
+                                        : isActive
+                                            ? 'Active'
+                                            : 'Load',
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.bold),
                               ),
                             ),
-                            child: Text(
-                              isThisImageModelLoading
-                                  ? 'Loading...'
-                                  : isThisTextModelLoading
-                                      ? '$loadPercent%'
-                                      : isActive
-                                          ? 'Active'
-                                          : 'Load',
-                              style:
-                                  const TextStyle(fontWeight: FontWeight.bold),
-                            ),
-                          ),
-                          IconButton(
-                            tooltip: isActive ? 'Unload model' : 'Delete model',
-                            onPressed: disableActions
-                                ? null
-                                : isActive
-                                    ? () => controller.unloadModel()
-                                    : () => _confirmDeleteModel(
-                                        context, model.filename),
-                            icon: Icon(
-                              isActive
-                                  ? Icons.eject_outlined
-                                  : Icons.delete_outline,
-                              size: 20,
-                              color: isActive
-                                  ? AppColors.warning
-                                  : AppColors.error,
-                            ),
-                          ),
-                        ] else ...[
-                          FilledButton(
-                            onPressed: disableActions
-                                ? null
-                                : () => _confirmDownload(context, model),
-                            style: FilledButton.styleFrom(
-                              backgroundColor: AppColors.primary,
-                              padding:
-                                  const EdgeInsets.symmetric(horizontal: 16),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(20),
-                              ),
-                            ),
-                            child: const Text('Get',
-                                style: TextStyle(fontWeight: FontWeight.bold)),
-                          ),
-                          if (model.url.trim().isNotEmpty)
                             IconButton(
-                              tooltip: 'Download to phone Downloads folder',
+                              tooltip:
+                                  isActive ? 'Unload model' : 'Delete model',
                               onPressed: disableActions
                                   ? null
-                                  : () => _confirmDownload(context, model,
-                                      isToDownloadsFolder: true),
-                              icon: const Icon(Icons.save_alt, size: 20),
-                              color: AppColors.secondary,
+                                  : isActive
+                                      ? () => controller.unloadModel()
+                                      : () => _confirmDeleteModel(
+                                          context, model.filename),
+                              icon: Icon(
+                                isActive
+                                    ? Icons.eject_outlined
+                                    : Icons.delete_outline,
+                                size: 20,
+                                color: isActive
+                                    ? AppColors.warning
+                                    : AppColors.error,
+                              ),
                             ),
+                          ] else ...[
+                            FilledButton(
+                              onPressed: disableActions
+                                  ? null
+                                  : () => _confirmDownload(context, model),
+                              style: FilledButton.styleFrom(
+                                backgroundColor: AppColors.primary,
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 16),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(20),
+                                ),
+                              ),
+                              child: const Text('Get',
+                                  style: TextStyle(
+                                      fontWeight: FontWeight.bold)),
+                            ),
+                            if (model.url.trim().isNotEmpty)
+                              IconButton(
+                                tooltip: 'Download to phone Downloads folder',
+                                onPressed: disableActions
+                                    ? null
+                                    : () => _confirmDownload(context, model,
+                                        isToDownloadsFolder: true),
+                                icon: const Icon(Icons.save_alt, size: 20),
+                                color: AppColors.secondary,
+                              ),
+                          ],
                         ],
-                      ],
-                    ),
+                      ),
+                  ],
+                ),
+                if (isCurrentlyDownloading) ...[
+                  const SizedBox(height: 16),
+                  _buildInlineDownloadProgress(context, model),
                 ],
-              ),
-              if (isCurrentlyDownloading) ...[
-                const SizedBox(height: 16),
-                _buildInlineDownloadProgress(context, model),
+                if (isThisModelLoading) ...[
+                  const SizedBox(height: 16),
+                  _buildModelLoadingProgress(context, model),
+                ],
               ],
-              if (isThisModelLoading) ...[
-                const SizedBox(height: 16),
-                _buildModelLoadingProgress(context, model),
-              ],
-            ],
+            ),
           ),
         ),
       );

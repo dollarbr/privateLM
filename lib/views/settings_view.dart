@@ -471,6 +471,18 @@ class SettingsView extends GetView<SettingsController> {
         displayValue: controller.maxTokens.value.toString(),
         icon: Icons.tag_rounded,
         warning: 'Your phone may crash with this value!',
+        onTapValue: () {
+          SettingsController.showManualEntryDialog(
+            context: context,
+            field: 'maxTokens',
+            label: 'Max Tokens',
+            currentValue: controller.maxTokens.value,
+            min: 64,
+            max: SettingsController.maxManualMaxTokens,
+            controller: controller,
+            onApplied: () {},
+          );
+        },
       ),
       _parameterDivider(isDark),
       (() {
@@ -508,6 +520,22 @@ class SettingsView extends GetView<SettingsController> {
           warning: isLiteRtActive
               ? 'Context capped at 4096 to prevent driver memory crash for LiteRT models.'
               : 'Context this large will eat all your RAM!',
+          onTapValue: () {
+            SettingsController.showManualEntryDialog(
+              context: context,
+              field: 'contextSize',
+              label: 'Context Size',
+              currentValue: controller.contextSize.value,
+              min: 512,
+              max: SettingsController.maxManualContextSize,
+              warningThreshold:
+                  SettingsController.contextSizeMemoryWarningThreshold,
+              warningMessage:
+                  'Warning: Values above 8192 may cause your device to run out of memory. Continue only if your device has sufficient RAM.',
+              controller: controller,
+              onApplied: () {},
+            );
+          },
         );
       })(),
     ]);
@@ -922,6 +950,7 @@ class SettingsView extends GetView<SettingsController> {
     required IconData icon,
     required String warning,
     String? displayValue,
+    VoidCallback? onTapValue,
   }) {
     final isOver = value > safeMax;
     final danger = safeMax < max
@@ -940,15 +969,17 @@ class SettingsView extends GetView<SettingsController> {
           Text(label,
               style:
                   GoogleFonts.inter(fontSize: 15, fontWeight: FontWeight.w400)),
-          const Spacer(),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-            decoration: BoxDecoration(
-                color: accent.withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(6)),
-            child: Text(displayValue ?? value.toStringAsFixed(2),
-                style: GoogleFonts.inter(
-                    fontSize: 13, color: accent, fontWeight: FontWeight.w600)),
+          GestureDetector(
+            onTap: onTapValue,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                  color: accent.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(6)),
+              child: Text(displayValue ?? value.toStringAsFixed(2),
+                  style: GoogleFonts.inter(
+                      fontSize: 13, color: accent, fontWeight: FontWeight.w600)),
+            ),
           ),
         ]),
         if (safeMax < max)

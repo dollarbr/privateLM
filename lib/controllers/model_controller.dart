@@ -355,6 +355,21 @@ class ModelController extends GetxController {
     await _saveCustomModels();
   }
 
+  /// Updates a custom model's metadata (name, description, url, template, etc.)
+  /// in both [customModels] and [availableModels], then persists to Hive.
+  Future<void> updateCustomModel(AiModel updated) async {
+    final index = customModels.indexWhere((m) => m.filename == updated.filename);
+    if (index != -1) {
+      customModels[index] = updated;
+    }
+    final availIndex =
+        availableModels.indexWhere((m) => m.filename == updated.filename);
+    if (availIndex != -1) {
+      availableModels[availIndex] = updated;
+    }
+    await _saveCustomModels();
+  }
+
   Future<void> downloadModel(AiModel model) async {
     try {
       await _download.downloadModel(
