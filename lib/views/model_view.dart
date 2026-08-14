@@ -2197,6 +2197,30 @@ class ModelView extends GetView<ModelController> {
     );
   }
 
+  Widget _swipeAction(
+      BuildContext context, IconData icon, String label, Color color,
+      {required Alignment alignment}) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 24),
+      alignment: alignment,
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: color, size: 20),
+          const SizedBox(width: 8),
+          Text(label,
+              style: GoogleFonts.inter(
+                  fontSize: 13, fontWeight: FontWeight.w600, color: color)),
+        ],
+      ),
+    );
+  }
+
   Future<bool> _confirmDeleteModel(
       BuildContext context, String filename) async {
     final confirmed = await showDialog<bool>(
@@ -2420,23 +2444,30 @@ class ModelView extends GetView<ModelController> {
           .clamp(0.0, 100.0)
           .toStringAsFixed(0);
 
+      final isEditable = model.isImported || model.isCustom;
+
       return Dismissible(
         key: ValueKey(model.filename),
-        direction: DismissDirection.horizontal,
+        direction: isEditable
+            ? DismissDirection.horizontal
+            : DismissDirection.startToEnd,
+        background: _swipeAction(
+            context, Icons.delete_outline, 'Delete', AppColors.error,
+            alignment: Alignment.centerLeft),
+        secondaryBackground: isEditable
+            ? _swipeAction(
+                context, Icons.edit_rounded, 'Edit', AppColors.primary,
+                alignment: Alignment.centerRight)
+            : null,
         confirmDismiss: (direction) async {
           if (direction == DismissDirection.startToEnd) {
-            // Left-to-right: edit model
-            _showEditModelSheet(context, model);
-            return false;
-          } else {
-            // Right-to-left: delete model
-            return await _confirmDeleteModel(
-                context, model.filename);
+            // Left-to-right: same as the trash icon.
+            if (disableActions) return false;
+            return await _confirmDeleteModel(context, model.filename);
           }
-        },
-        onDismissed: (direction) {
-          // Deletion is handled in confirmDismiss via _confirmDeleteModel.
-          // This fires after the dismiss animation completes.
+          // Right-to-left: edit imported / custom-url models in place.
+          _showEditModelSheet(context, model);
+          return false;
         },
         child: Card(
           margin: const EdgeInsets.only(bottom: 12),

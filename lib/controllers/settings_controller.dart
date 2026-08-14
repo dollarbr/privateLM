@@ -663,10 +663,10 @@ class SettingsController extends GetxController {
   }
 
   /// Maximum value allowed for manual Max Tokens entry.
-  static const maxManualMaxTokens = 4096;
+  static const maxManualMaxTokens = 16384;
 
-  /// Threshold above which a memory warning is shown for Context Size.
-  static const contextSizeMemoryWarningThreshold = 8192;
+  /// Threshold above which a memory warning is shown (Max Tokens / Context Size).
+  static const memoryWarningThreshold = 8192;
 
   /// Maximum value allowed for manual Context Size entry.
   static const maxManualContextSize = 16384;
@@ -694,8 +694,12 @@ class SettingsController extends GetxController {
     return showDialog<int>(
       context: context,
       barrierDismissible: true,
-      builder: (dialogContext) => Obx(() {
-        final parsed = int.tryParse(textController.text);
+      builder: (dialogContext) => ValueListenableBuilder<TextEditingValue>(
+        // TextEditingController is a ValueNotifier — rebuilds the warning as
+        // the user types. (Obx here threw: no Rx is read in this subtree.)
+        valueListenable: textController,
+        builder: (_, textValue, __) {
+        final parsed = int.tryParse(textValue.text);
         final isOverThreshold = warningThreshold != null &&
             parsed != null &&
             parsed > warningThreshold;
@@ -832,7 +836,8 @@ class SettingsController extends GetxController {
             ),
           ],
         );
-      }),
+        },
+      ),
     ).then((value) {
       if (value != null) {
         if (isMaxTokens) {

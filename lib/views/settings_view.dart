@@ -479,6 +479,9 @@ class SettingsView extends GetView<SettingsController> {
             currentValue: controller.maxTokens.value,
             min: 64,
             max: SettingsController.maxManualMaxTokens,
+            warningThreshold: SettingsController.memoryWarningThreshold,
+            warningMessage:
+                'Warning: values above 8192 may cause your device to run out of memory. Continue only if your device has sufficient RAM.',
             controller: controller,
             onApplied: () {},
           );
@@ -494,12 +497,15 @@ class SettingsView extends GetView<SettingsController> {
                 inference.loadedModelRuntime.value == 'litert') ||
             (!inference.isModelLoaded.value &&
                 savedRuntime.toLowerCase() == 'litert');
-        final maxContext = isLiteRtActive ? 4096.0 : 8192.0;
-        final divisions = isLiteRtActive ? 7 : 15;
-        final currentValue =
-            controller.contextSize.value.toDouble().clamp(512.0, maxContext);
+        final saved = controller.contextSize.value.toDouble();
+        // LiteRT caps hard at 4096 (driver OOM). For llama the slider tops at
+        // 8192, but a manually entered value above that is honored, not clamped.
+        final maxContext =
+            isLiteRtActive ? 4096.0 : (saved > 8192.0 ? saved : 8192.0);
+        final divisions = isLiteRtActive ? 7 : (maxContext ~/ 512) - 1;
+        final currentValue = saved.clamp(512.0, maxContext);
 
-        if (currentValue != controller.contextSize.value.toDouble()) {
+        if (isLiteRtActive && currentValue != saved) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             controller.setContextSize(currentValue.toInt());
           });
@@ -528,10 +534,9 @@ class SettingsView extends GetView<SettingsController> {
               currentValue: controller.contextSize.value,
               min: 512,
               max: SettingsController.maxManualContextSize,
-              warningThreshold:
-                  SettingsController.contextSizeMemoryWarningThreshold,
+              warningThreshold: SettingsController.memoryWarningThreshold,
               warningMessage:
-                  'Warning: Values above 8192 may cause your device to run out of memory. Continue only if your device has sufficient RAM.',
+                  'Warning: values above 8192 may cause your device to run out of memory. Continue only if your device has sufficient RAM.',
               controller: controller,
               onApplied: () {},
             );

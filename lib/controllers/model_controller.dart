@@ -173,8 +173,13 @@ class ModelController extends GetxController {
     }
 
     // Remove any imported models that are no longer downloaded
-    availableModels.removeWhere(
-        (model) => model.isImported && !files.contains(model.filename));
+    bool isStaleImport(AiModel m) =>
+        m.isImported && !files.contains(m.filename);
+    availableModels.removeWhere(isStaleImport);
+    if (customModels.any(isStaleImport)) {
+      customModels.removeWhere(isStaleImport);
+      await _saveCustomModels();
+    }
 
     if (localFilter.value.isEmpty) {
       localFilter.value = defaultLocalFilter;
@@ -361,6 +366,10 @@ class ModelController extends GetxController {
     final index = customModels.indexWhere((m) => m.filename == updated.filename);
     if (index != -1) {
       customModels[index] = updated;
+    } else {
+      // Imported models are rebuilt from disk on every refreshDownloaded(),
+      // so the edited copy has to be persisted here or it is lost.
+      customModels.add(updated);
     }
     final availIndex =
         availableModels.indexWhere((m) => m.filename == updated.filename);
