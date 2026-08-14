@@ -46,23 +46,23 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Build APK (arm64)
+      # One build with --split-per-abi, not two builds. Without that flag a
+      # single --target-platform emits plain app-release.apk, so the second
+      # build silently overwrote the first and no per-ABI file ever existed.
+      - name: Build APKs
         env:
           PRIVATELM_ALLOW_DEBUG_RELEASE_SIGNING: "true"
           GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -Dfile.encoding=utf-8 -Dkotlin.daemon.jvm.options=-Xmx4g"
-        run: flutter build apk --release --target-platform android-arm64
-
-      - name: Build APK (armeabi-v7a)
-        env:
-          PRIVATELM_ALLOW_DEBUG_RELEASE_SIGNING: "true"
-          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -Dfile.encoding=utf-8 -Dkotlin.daemon.jvm.options=-Xmx4g"
-        run: flutter build apk --release --target-platform android-arm
+        run: |
+          flutter build apk --release --split-per-abi \
+            --target-platform android-arm,android-arm64
 
       - name: Name APKs after the version
         env:
           TAG: ${{ github.ref_name }}
         run: |
           cd build/app/outputs/flutter-apk
+          ls -1 # surfaces a naming mismatch here rather than in the mv below
           mv app-arm64-v8a-release.apk    "PrivateLM-$TAG-arm64-v8a.apk"
           mv app-armeabi-v7a-release.apk  "PrivateLM-$TAG-armeabi-v7a.apk"
           ls -lh PrivateLM-*.apk
