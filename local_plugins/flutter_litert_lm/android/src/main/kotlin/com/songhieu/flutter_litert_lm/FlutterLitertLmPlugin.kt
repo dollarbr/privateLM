@@ -19,6 +19,7 @@ import io.flutter.plugin.common.MethodChannel.Result
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collect
 import android.os.Build
+import android.util.Log
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -77,18 +78,37 @@ class FlutterLitertLmPlugin : FlutterPlugin, MethodCallHandler, EventChannel.Str
     }
 
     /**
+     * Vendor NPU driver sonames, in the order LiteRT itself tries them.
+     * Written the way System.loadLibrary wants them: no "lib" prefix, no ".so".
+     */
+    private val logTag = "LiteRtNpuProbe"
+
+    private val vendorDriverSonames = listOf(
+        "neuronusdk_adapter.mtk",
+        "neuronusdk_adapter.9.mtk",
+        "neuronusdk_adapter",
+        "neuron_adapter_mgvi",
+        "neuron_adapter",
+    )
+
+    /**
      * Can this build actually reach the NPU?
      *
-     * `Backend.NPU(dir)` does not ship a driver — it only tells LiteRT which
-     * directory to load the vendor *dispatch* library from. The published
-     * litertlm-android AAR carries libLiteRt.so, liblitertlm_jni.so and
-     * libLiteRtClGlAccelerator.so and nothing else, so unless a dispatch library
-     * has been bundled into jniLibs the NPU tier is guaranteed to fail and fall
-     * back — at the cost of a full engine-init attempt first.
+     * Two separate pieces have to line up, and only one of them is ours:
      *
-     * So probe the directory rather than inferring from the SoC name: a
-     * Dimensity 7300 is on Google's supported-SoC list and still cannot run on
-     * its APU without these files present.
+     *  1. The *dispatch* library, which we build from LiteRT and ship in
+     *     jniLibs. `Backend.NPU(dir)` does not carry one — it only names the
+     *     directory to load it from, and the published litertlm-android AAR
+     *     contains just liblitertlm_jni.so.
+     *  2. The vendor *driver*, which is proprietary and lives on the device.
+     *     The dispatch library dlopens it by bare soname, so it resolves only
+     *     if the OEM exposed it through /system/etc/public.libraries*.txt.
+     *     `System.loadLibrary` answers that question from inside the app's own
+     *     linker namespace, which is the only namespace whose answer counts.
+     *
+     * Probe both rather than inferring from the SoC name: a Dimensity 7300 is
+     * on Google's supported-SoC list and still cannot touch its APU if either
+     * piece is missing.
      */
     private fun handleNpuStatus(result: Result) {
         val dir = File(context.applicationInfo.nativeLibraryDir)
@@ -99,14 +119,43 @@ class FlutterLitertLmPlugin : FlutterPlugin, MethodCallHandler, EventChannel.Str
                 name.startsWith("libQnnHtp")             // Qualcomm QAIRT
         } ?: emptyList()
 
+        val bundledDriver = libs.any { !it.startsWith("libLiteRtDispatch") }
+        val systemDriver = if (bundledDriver) null else findSystemDriver()
+
         result.success(
             mapOf(
-                "available" to libs.isNotEmpty(),
+                "available" to (libs.any { it.startsWith("libLiteRtDispatch") } &&
+                    (bundledDriver || systemDriver != null)),
                 "libraries" to libs,
+                "systemDriver" to (systemDriver ?: ""),
                 "soc" to if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) Build.SOC_MODEL else "",
                 "nativeLibraryDir" to dir.path,
             )
         )
+    }
+
+    /**
+     * Name of the first vendor NPU driver the app can actually load, or null.
+     *
+     * Same sonames the LiteRT dispatch library tries, in the same order (see
+     * litert/vendors/mediatek/neuron_adapter_api.cc), so a hit here means the
+     * dispatch library will find it too. Loading is the test — the library is
+     * left loaded, which is exactly what the NPU tier would do moments later.
+     */
+    private fun findSystemDriver(): String? = vendorDriverSonames.firstOrNull { soname ->
+        try {
+            System.loadLibrary(soname)
+            Log.i(logTag, "NPU driver loaded: lib$soname.so")
+            true
+        } catch (e: UnsatisfiedLinkError) {
+            // The linker's own wording separates "no such file" from "not
+            // accessible for the namespace", which are very different verdicts.
+            Log.i(logTag, "NPU driver lib$soname.so rejected: ${e.message}")
+            false
+        } catch (e: SecurityException) {
+            Log.i(logTag, "NPU driver lib$soname.so rejected: $e")
+            false
+        }
     }
 
     private fun handleCreateEngine(call: MethodCall, result: Result) {
