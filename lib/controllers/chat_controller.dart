@@ -26,6 +26,7 @@ import '../services/local_image_service.dart';
 import '../services/app_log_service.dart';
 import '../services/image_generation_notification_service.dart';
 import '../services/document_extractor_service.dart';
+import '../services/audio_wav_service.dart';
 import '../services/tools/builtin_tools.dart';
 import '../services/tools/tool_call_parser.dart';
 import '../services/tools/tool_registry.dart';
@@ -693,6 +694,13 @@ class ChatController extends GetxController {
         } else {
           final inference = Get.find<InferenceService>();
 
+          // LiteRT-LM reads WAV and nothing else, so convert first. Done here
+          // rather than at pick time because the file only has to be decoded if
+          // it is actually about to be sent.
+          final audioPath = fileType == 'audio' && filePath != null
+              ? await AudioWavService.ensureWav(filePath)
+              : null;
+
           // LiteRT models can consume image/audio attachments. GGUF currently
           // returns a clear unsupported message from the inference layer.
 
@@ -702,7 +710,7 @@ class ChatController extends GetxController {
             conversationHistory: history,
             source: 'chat',
             imagePath: imagePath,
-            audioPath: fileType == 'audio' ? filePath : null,
+            audioPath: audioPath,
             onToken: (token) {
               // Real-time streaming update
               streamingResponse.value += token;
@@ -970,7 +978,16 @@ class ChatController extends GetxController {
 
   /// Built once: the catalogue is static, and rebuilding it per turn would
   /// re-create every closure for nothing.
-  final ToolRegistry _tools = buildDefaultToolRegistry();
+  /// Built per use rather than cached: it is five closures, and the user can
+  /// tick a tool off between two messages.
+  ToolRegistry get _tools {
+    final settings = Get.find<SettingsController>();
+    return buildDefaultToolRegistry(
+      enabled: settings.enabledTools,
+      customSearchUrl: settings.customSearchUrl.value,
+      customSearchToken: settings.customSearchToken.value,
+    );
+  }
 
   String get _effectiveSystemPrompt {
     final settings = Get.find<SettingsController>();

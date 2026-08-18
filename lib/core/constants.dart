@@ -41,6 +41,9 @@ class AppConstants {
   static const String keyLiteRtPerformanceMode = 'litert_performance_mode';
   static const String keyThinkingMode = 'thinking_mode';
   static const String keyToolsEnabled = 'tools_enabled';
+  static const String keyEnabledTools = 'enabled_tools';
+  static const String keyCustomSearchUrl = 'custom_search_url';
+  static const String keyCustomSearchToken = 'custom_search_token';
   static const String keyLiteRtGpuWarningAccepted =
       'litert_gpu_warning_accepted';
   static const String keyLiteRtGpuLoadPending = 'litert_gpu_load_pending';
@@ -72,6 +75,14 @@ class AppConstants {
   /// Off by default: the tool catalogue costs context on every turn, and a small
   /// model that has never been trained for tools answers worse with it present.
   static const bool defaultToolsEnabled = false;
+
+  /// Which tools are ticked when the user first turns tools on. The offline
+  /// three only — a local-first app does not reach the network by default.
+  static const List<String> defaultEnabledTools = [
+    'get_datetime',
+    'calculate',
+    'get_device_info',
+  ];
   static const int defaultImageSteps = 1;
   static const bool defaultImageGenForceCpu = true;
   static const int defaultImageGenGpuGuardMb = 1843; // 1.8 GB
@@ -135,7 +146,8 @@ class AppConstants {
       'url':
           'https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm',
       'size': '2.46 GB',
-      'description': 'Strong general chat LiteRT-LM model from Google Gemma',
+      'description':
+          'Multimodal — reads text, images and audio. Best size/quality balance',
       'template': 'litert',
       'runtime': 'litert',
       'vision': 'true',
@@ -146,7 +158,8 @@ class AppConstants {
       'url':
           'https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it.litertlm',
       'size': '3.40 GB',
-      'description': 'Highest quality LiteRT-LM option; needs about 5 GB RAM',
+      'description':
+          'Multimodal — text, images and audio. Highest quality; needs ~5 GB RAM',
       'template': 'litert',
       'runtime': 'litert',
       'vision': 'true',
@@ -175,7 +188,8 @@ class AppConstants {
       'url':
           'https://huggingface.co/bartowski/Qwen2-VL-2B-Instruct-GGUF/resolve/main/Qwen2-VL-2B-Instruct-Q4_K_M.gguf',
       'size': '1.5 GB',
-      'description': 'Vision-capable — can understand images',
+      'description':
+          'Vision-capable model, but images run on LiteRT-LM only — here it is text',
       'template': 'chatml',
       'vision': 'true',
     },

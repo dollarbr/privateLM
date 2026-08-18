@@ -1,7 +1,10 @@
+import 'dart:io' show Platform;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:flutter_litert_lm/flutter_litert_lm.dart';
 import '../controllers/settings_controller.dart';
 import '../core/colors.dart';
 import '../core/constants.dart';
@@ -9,6 +12,7 @@ import '../services/inference_service.dart';
 import '../services/hive_service.dart';
 import '../services/local_image_service.dart';
 import '../services/device_info_service.dart';
+import '../services/tools/builtin_tools.dart';
 import '../services/device_info_native.dart' as platform_info;
 import '../ffi/sd_ffi_bindings.dart';
 import 'log_view.dart';
@@ -150,6 +154,10 @@ class SettingsView extends GetView<SettingsController> {
               _sectionLabel(context, 'MODEL PARAMETERS'),
               _buildLiteRtCard(context, isDark),
               const SizedBox(height: 10),
+              if (Platform.isAndroid) ...[
+                _buildNpuCard(context, isDark),
+                const SizedBox(height: 10),
+              ],
               _buildThinkingCard(context, isDark),
               const SizedBox(height: 10),
               _buildToolsCard(context, isDark),
@@ -404,28 +412,121 @@ class SettingsView extends GetView<SettingsController> {
     });
   }
 
+  /// Master switch plus one row per tool.
+  ///
+  /// The per-tool rows only appear once the master switch is on, and they are
+  /// what the prompt is built from — a tool the user unticked is never
+  /// advertised to the model, so it cannot be called and then refused.
+  ///
+  /// The catalogue is read from [buildDefaultToolRegistry] with no filter, so a
+  /// tool added there shows up here without touching this file.
   Widget _buildToolsCard(BuildContext context, bool isDark) {
     final enabled = controller.toolsEnabled.value;
+    final accent = isDark ? const Color(0xFF0A84FF) : AppColors.primary;
+    final catalogue = buildDefaultToolRegistry().all.toList();
+    final on = controller.enabledTools;
+
     return _appleGroupedCard(context, isDark, children: [
       _appleListTile(
         context,
         isDark,
-        leading: _iconBox(
-            isDark ? const Color(0xFF0A84FF) : AppColors.primary,
-            Icons.handyman_rounded),
+        leading: _iconBox(accent, Icons.handyman_rounded),
         title: 'Tools',
         subtitle: enabled
-            ? 'The model can call the clock, calculator and device info'
+            ? '${on.length} of ${catalogue.length} enabled'
             : 'Off — the tool list is kept out of the prompt',
-        trailing: enabled
-            ? Icon(Icons.check,
-                size: 18,
-                color: isDark ? const Color(0xFF0A84FF) : AppColors.primary)
-            : null,
-        showDivider: false,
+        trailing: enabled ? Icon(Icons.check, size: 18, color: accent) : null,
+        showDivider: enabled,
         onTap: () => controller.setToolsEnabled(!enabled),
       ),
+      if (enabled)
+        for (var i = 0; i < catalogue.length; i++)
+          _appleListTile(
+            context,
+            isDark,
+            leading: _iconBox(
+                catalogue[i].requiresNetwork ? AppColors.warning : accent,
+                catalogue[i].requiresNetwork
+                    ? Icons.public_rounded
+                    : Icons.offline_bolt_rounded),
+            title: catalogue[i].name,
+            subtitle: catalogue[i].requiresNetwork
+                ? 'Needs internet — ${catalogue[i].description}'
+                : catalogue[i].description,
+            trailing: on.contains(catalogue[i].name)
+                ? Icon(Icons.check, size: 18, color: accent)
+                : null,
+            showDivider: i < catalogue.length - 1,
+            onTap: () => controller.toggleTool(
+                catalogue[i].name, !on.contains(catalogue[i].name)),
+          ),
+      if (enabled && on.contains('web_search'))
+        _buildCustomSearchFields(context, isDark),
     ]);
+  }
+
+  /// Optional search endpoint for web_search.
+  ///
+  /// Only shown once web_search is ticked, since it configures nothing else.
+  /// Left empty, search falls back to scraping Brave, then Startpage, then
+  /// DuckDuckGo — which works but breaks whenever one of them redesigns. A URL
+  /// here points at something with an actual contract: a SearXNG instance
+  /// (no token, plain GET) or a service like Tavily (token, JSON POST).
+  Widget _buildCustomSearchFields(BuildContext context, bool isDark) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 4, 16, 14),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(
+          'Optional. Empty means Brave → Startpage → DuckDuckGo.',
+          style: GoogleFonts.inter(
+              fontSize: 12, color: Theme.of(context).hintColor),
+        ),
+        const SizedBox(height: 8),
+        TextField(
+          controller: controller.customSearchUrlController,
+          style: GoogleFonts.inter(fontSize: 14),
+          keyboardType: TextInputType.url,
+          autocorrect: false,
+          decoration: InputDecoration(
+            labelText: 'Custom search API URL',
+            hintText: 'https://searx.example.org/search',
+            suffixIcon: IconButton(
+              icon: const Icon(Icons.check_circle_outline, size: 20),
+              onPressed: () => controller
+                  .setCustomSearchUrl(controller.customSearchUrlController.text),
+            ),
+          ),
+          onSubmitted: controller.setCustomSearchUrl,
+        ),
+        const SizedBox(height: 8),
+        TextField(
+          controller: controller.customSearchTokenController,
+          style: GoogleFonts.inter(fontSize: 14),
+          autocorrect: false,
+          obscureText: true,
+          decoration: InputDecoration(
+            labelText: 'Custom search API token',
+            hintText: 'leave empty for SearXNG',
+            suffixIcon: IconButton(
+              icon: const Icon(Icons.check_circle_outline, size: 20),
+              onPressed: () => controller.setCustomSearchToken(
+                  controller.customSearchTokenController.text),
+            ),
+          ),
+          onSubmitted: controller.setCustomSearchToken,
+        ),
+        const SizedBox(height: 6),
+        Text(
+          controller.customSearchUrl.value.isEmpty
+              ? 'Using the scrape chain.'
+              : 'Using ${controller.customSearchUrl.value}'
+                  '${controller.customSearchToken.value.isEmpty ? " (GET, no auth)" : " (POST, bearer token)"}'
+                  ' first, scrapes as fallback.',
+          style: GoogleFonts.inter(
+              fontSize: 11, color: Theme.of(context).hintColor),
+        ),
+      ]),
+    );
   }
 
   Widget _buildThinkingCard(BuildContext context, bool isDark) {
@@ -471,6 +572,41 @@ class SettingsView extends GetView<SettingsController> {
           onTap: () => controller.setThinkingMode(modes[i].value),
         ),
     ]);
+  }
+
+  /// Read-only report on the NPU rung.
+  ///
+  /// Both halves have to be there — the dispatch library we ship and the
+  /// vendor driver the device exposes — so the useful thing to show is what
+  /// the probe actually found, not a yes/no. Probed on build rather than
+  /// cached: it costs a directory listing plus a dlopen, and the answer can
+  /// change between installs.
+  Widget _buildNpuCard(BuildContext context, bool isDark) {
+    return FutureBuilder<NpuStatus>(
+      future: NpuStatus.probe(),
+      builder: (context, snapshot) {
+        final status = snapshot.data;
+        final subtitle = switch ((snapshot.connectionState, status)) {
+          (ConnectionState.done, final s?) => s.toString(),
+          (ConnectionState.done, null) => 'Probe failed: ${snapshot.error}',
+          _ => 'Checking…',
+        };
+        return _appleGroupedCard(context, isDark, children: [
+          _appleListTile(
+            context,
+            isDark,
+            leading: _iconBox(
+                status?.available == true
+                    ? AppColors.success
+                    : (isDark ? const Color(0xFF0A84FF) : AppColors.primary),
+                Icons.memory_rounded),
+            title: 'NPU',
+            subtitle: subtitle,
+            showDivider: false,
+          ),
+        ]);
+      },
+    );
   }
 
   Widget _buildLiteRtCard(BuildContext context, bool isDark) {

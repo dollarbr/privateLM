@@ -51,6 +51,13 @@ class SettingsController extends GetxController {
   final liteRtPerformanceMode = AppConstants.defaultLiteRtPerformanceMode.obs;
   final thinkingMode = AppConstants.defaultThinkingMode.obs;
   final toolsEnabled = AppConstants.defaultToolsEnabled.obs;
+  final enabledTools = AppConstants.defaultEnabledTools.toSet().obs;
+
+  /// Optional search endpoint. Empty means web_search uses the scrape chain.
+  final customSearchUrl = ''.obs;
+  final customSearchToken = ''.obs;
+  final customSearchUrlController = TextEditingController();
+  final customSearchTokenController = TextEditingController();
   final imageSteps = 1.obs;
   final imageGenForceCpu = AppConstants.defaultImageGenForceCpu.obs;
   final imageGenBackend = Backend.cpu.obs;
@@ -200,6 +207,18 @@ class SettingsController extends GetxController {
           defaultValue: AppConstants.defaultToolsEnabled,
         ) ??
         AppConstants.defaultToolsEnabled;
+    customSearchUrl.value =
+        _hive.getSetting<String>(AppConstants.keyCustomSearchUrl) ?? '';
+    customSearchToken.value =
+        _hive.getSetting<String>(AppConstants.keyCustomSearchToken) ?? '';
+    customSearchUrlController.text = customSearchUrl.value;
+    customSearchTokenController.text = customSearchToken.value;
+    final storedTools = _hive.getSetting<List>(AppConstants.keyEnabledTools);
+    if (storedTools != null) {
+      enabledTools
+        ..clear()
+        ..addAll(storedTools.cast<String>());
+    }
     thinkingMode.value = _hive.getSetting<String>(
           AppConstants.keyThinkingMode,
           defaultValue: AppConstants.defaultThinkingMode,
@@ -879,6 +898,24 @@ class SettingsController extends GetxController {
   Future<void> setToolsEnabled(bool enabled) async {
     toolsEnabled.value = enabled;
     await _hive.setSetting(AppConstants.keyToolsEnabled, enabled);
+  }
+
+  /// Tick or untick one tool. The master [toolsEnabled] switch still gates all
+  /// of them, so an empty selection is allowed — it just leaves nothing to call.
+  Future<void> toggleTool(String name, bool on) async {
+    on ? enabledTools.add(name) : enabledTools.remove(name);
+    await _hive.setSetting(
+        AppConstants.keyEnabledTools, enabledTools.toList());
+  }
+
+  Future<void> setCustomSearchUrl(String url) async {
+    customSearchUrl.value = url.trim();
+    await _hive.setSetting(AppConstants.keyCustomSearchUrl, url.trim());
+  }
+
+  Future<void> setCustomSearchToken(String token) async {
+    customSearchToken.value = token.trim();
+    await _hive.setSetting(AppConstants.keyCustomSearchToken, token.trim());
   }
 
   Future<void> setThinkingMode(String mode) async {
