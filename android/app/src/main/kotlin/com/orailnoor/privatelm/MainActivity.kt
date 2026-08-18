@@ -140,6 +140,25 @@ class MainActivity : FlutterActivity() {
             when (call.method) {
                 // Decoding happens off the main thread: a long clip on a slow
                 // hardware decoder would otherwise drop frames in the UI.
+                // LiteRT-LM only reads WAV, so anything else is decoded here
+                // first. Off the main thread: a long clip takes seconds.
+                "audioToWav" -> {
+                    val path = call.argument<String>("path")
+                    if (path.isNullOrBlank()) {
+                        result.error("INVALID_AUDIO", "Audio path is missing.", null)
+                        return@setMethodCallHandler
+                    }
+                    thread(name = "audio-to-wav") {
+                        try {
+                            val wav = AudioToWav.convert(path, File(cacheDir, "audio_wav"))
+                            mainHandler.post { result.success(wav) }
+                        } catch (e: Exception) {
+                            mainHandler.post {
+                                result.error("AUDIO_CONVERT_FAILED", e.message ?: e.toString(), null)
+                            }
+                        }
+                    }
+                }
                 "extractVideoFrames" -> {
                     val path = call.argument<String>("path")
                     val maxFrames = (call.argument<Any>("maxFrames") as? Number)?.toInt() ?: 4

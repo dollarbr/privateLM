@@ -203,12 +203,17 @@ class InferenceEngine {
       await cacheDir.create(recursive: true);
       onProgress?.call(0.18);
 
+      // Audio rides along with vision. The multimodal .litertlm files this app
+      // loads (gemma-3n, gemma-4) carry both encoders in one file, and there is
+      // no separate flag to key off; a file with only a vision encoder is
+      // caught by the retry below.
       _liteEngine = await _createLiteRtEngine(
         modelPath: modelPath,
         contextSize: contextSize,
         cacheDir: cacheDir.path,
         backend: backend,
         enableVision: enableVision,
+        enableAudio: enableVision,
       );
       _hasLoadedModel = true;
       onProgress?.call(0.92);
@@ -232,6 +237,33 @@ class InferenceEngine {
               'This LiteRT-LM file is text-only, but it was loaded as a vision model. Turn off Vision for this model or re-import it as a normal chat model.',
         );
       }
+      // Asking for an audio encoder the file does not have fails the whole
+      // load, so drop audio and keep the model rather than losing it.
+      if (enableVision) {
+        print('[Inference] Retrying without the audio encoder.');
+        try {
+          _liteEngine = await _createLiteRtEngine(
+            modelPath: modelPath,
+            contextSize: contextSize,
+            cacheDir: cacheDir.path,
+            backend: backend,
+            enableVision: true,
+            enableAudio: false,
+          );
+          _hasLoadedModel = true;
+          onProgress?.call(0.92);
+          return LoadResult(
+            success: true,
+            message: 'LiteRT-LM model loaded ($backendLabel backend, no audio).',
+            gpuName: tier == AccelTier.cpu ? '' : 'LiteRT $backendLabel',
+            gpuLayers: tier == AccelTier.cpu ? 0 : 1,
+            runtime: 'litert',
+            backend: backend.name,
+          );
+        } catch (audioFallbackError) {
+          print('[Inference] Without-audio retry failed too: $audioFallbackError');
+        }
+      }
       if (enableVision && errorStr.contains('exactly one signature but got')) {
         print(
             '[Inference] Vision encoder signature mismatch. Falling back to text-only mode.');
@@ -242,6 +274,7 @@ class InferenceEngine {
             cacheDir: cacheDir.path,
             backend: backend,
             enableVision: false,
+            enableAudio: false,
           );
           _hasLoadedModel = true;
           onProgress?.call(0.92);
@@ -279,6 +312,7 @@ class InferenceEngine {
     required String cacheDir,
     required LiteLmBackend backend,
     required bool enableVision,
+    required bool enableAudio,
   }) {
     return LiteLmEngine.create(
       LiteLmEngineConfig(
@@ -286,7 +320,11 @@ class InferenceEngine {
         backend: backend,
         cacheDir: cacheDir,
         visionBackend: enableVision ? LiteLmBackend.cpu : null,
-        audioBackend: null,
+        // Leaving this null and then sending audio is what segfaults the
+        // engine thread: the encoder is never built, and the first audio frame
+        // dereferences it. Null means "this model has no audio", never
+        // "decide later".
+        audioBackend: enableAudio ? LiteLmBackend.cpu : null,
         maxNumTokens: contextSize,
       ),
     );
