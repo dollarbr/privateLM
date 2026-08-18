@@ -5,15 +5,26 @@ import 'package:intl/intl.dart';
 
 import 'calculator.dart';
 import 'tool_registry.dart';
+import 'web_tools.dart';
 
-/// The tools that need no permission and no network.
+/// Every tool the app can offer, offline ones first.
 ///
-/// Everything here answers something a language model genuinely cannot know or
-/// reliably compute on its own: the wall clock, arithmetic, and what hardware it
-/// is running on. Tools that need a runtime permission (location, contacts,
-/// camera) or the network belong behind an explicit user opt-in and are not
-/// wired up here.
-ToolRegistry buildDefaultToolRegistry() => ToolRegistry([
+/// The offline three answer what a language model genuinely cannot know or
+/// reliably compute: the wall clock, arithmetic, and the hardware it runs on.
+/// The two network tools are listed here too but each one is individually
+/// switchable in Settings, because turning them on is the moment a local-only
+/// app starts talking to the internet. Tools needing a runtime permission
+/// (location, contacts, camera) are still not wired up.
+///
+/// [enabled] filters by name; null means every tool. Pass the user's selection
+/// so the prompt advertises exactly what will actually run — a model told about
+/// a tool that then refuses to run wastes a turn arguing with itself.
+ToolRegistry buildDefaultToolRegistry({
+  Set<String>? enabled,
+  String customSearchUrl = '',
+  String customSearchToken = '',
+}) =>
+    ToolRegistry([
       Tool(
         name: 'get_datetime',
         description: "The device's current date and time, with its time zone.",
@@ -58,4 +69,25 @@ ToolRegistry buildDefaultToolRegistry() => ToolRegistry([
           return 'Unknown platform: ${Platform.operatingSystem}';
         },
       ),
-    ]);
+      Tool(
+        name: 'web_search',
+        description: 'Search the live web for current information — news, '
+            'prices, weather, anything past the training cutoff. Returns titles, '
+            'URLs and snippets; call read_url on a result for the full page.',
+        parameters: {'query': 'what to search for'},
+        requiresNetwork: true,
+        run: (args) => webSearch(
+          args['query'] ?? '',
+          customSearchUrl: customSearchUrl,
+          customSearchToken: customSearchToken,
+        ),
+      ),
+      Tool(
+        name: 'read_url',
+        description: 'Fetch a web page and return its readable text. Use after '
+            'web_search, or when the user shares a link.',
+        parameters: {'url': 'full http(s) URL'},
+        requiresNetwork: true,
+        run: (args) => readUrl(args['url'] ?? ''),
+      ),
+    ].where((t) => enabled == null || enabled.contains(t.name)));

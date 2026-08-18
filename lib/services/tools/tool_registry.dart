@@ -11,11 +11,15 @@ class Tool {
 
   final FutureOr<String> Function(Map<String, String> args) run;
 
+  /// Shown in Settings so the user knows which tools leave the device.
+  final bool requiresNetwork;
+
   const Tool({
     required this.name,
     required this.description,
     this.parameters = const {},
     required this.run,
+    this.requiresNetwork = false,
   });
 
   String get signature => parameters.isEmpty
