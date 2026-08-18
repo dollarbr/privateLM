@@ -94,4 +94,12 @@ class MethodChannelFlutterLitertLm extends FlutterLitertLmPlatform {
     );
     return result!;
   }
+
+  @override
+  Future<Map<String, dynamic>> npuStatus() async {
+    final result = await _methodChannel.invokeMapMethod<String, dynamic>(
+      'npuStatus',
+    );
+    return result ?? const {'available': false};
+  }
 }

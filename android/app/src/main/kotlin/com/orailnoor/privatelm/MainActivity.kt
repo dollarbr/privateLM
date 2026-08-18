@@ -23,10 +23,12 @@ import org.json.JSONObject
 
 class MainActivity : FlutterActivity() {
     private val importChannelName = "com.aichat.ai_chat/model_import"
+    private val mediaChannelName = "com.aichat.ai_chat/media"
     private val importRequestCode = 4207
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private var importChannel: MethodChannel? = null
+    private var mediaChannel: MethodChannel? = null
     private var pendingImportResult: MethodChannel.Result? = null
     private var pendingModelsDir: String? = null
     private val monitoredInAppDownloads = ConcurrentHashMap.newKeySet<Long>()
@@ -133,6 +135,36 @@ class MainActivity : FlutterActivity() {
             }
         }
 
+        mediaChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, mediaChannelName)
+        mediaChannel?.setMethodCallHandler { call, result ->
+            when (call.method) {
+                // Decoding happens off the main thread: a long clip on a slow
+                // hardware decoder would otherwise drop frames in the UI.
+                "extractVideoFrames" -> {
+                    val path = call.argument<String>("path")
+                    val maxFrames = (call.argument<Any>("maxFrames") as? Number)?.toInt() ?: 4
+                    if (path.isNullOrBlank()) {
+                        result.error("INVALID_VIDEO", "Video path is missing.", null)
+                        return@setMethodCallHandler
+                    }
+                    thread(name = "video-frames") {
+                        try {
+                            val frames = VideoFrames.extract(
+                                path,
+                                maxFrames,
+                                File(cacheDir, "video_frames"),
+                            )
+                            mainHandler.post { result.success(frames) }
+                        } catch (e: Exception) {
+                            mainHandler.post {
+                                result.error("VIDEO_FRAMES_FAILED", e.message ?: e.toString(), null)
+                            }
+                        }
+                    }
+                }
+                else -> result.notImplemented()
+            }
+        }
     }
 
     private fun restartApp() {

@@ -18,6 +18,8 @@ import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collect
+import android.os.Build
+import java.io.File
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -69,8 +71,42 @@ class FlutterLitertLmPlugin : FlutterPlugin, MethodCallHandler, EventChannel.Str
             "sendMessage" -> handleSendMessage(call, result)
             "startMessageStream" -> handleStartMessageStream(call, result)
             "countTokens" -> handleCountTokens(call, result)
+            "npuStatus" -> handleNpuStatus(result)
             else -> result.notImplemented()
         }
+    }
+
+    /**
+     * Can this build actually reach the NPU?
+     *
+     * `Backend.NPU(dir)` does not ship a driver — it only tells LiteRT which
+     * directory to load the vendor *dispatch* library from. The published
+     * litertlm-android AAR carries libLiteRt.so, liblitertlm_jni.so and
+     * libLiteRtClGlAccelerator.so and nothing else, so unless a dispatch library
+     * has been bundled into jniLibs the NPU tier is guaranteed to fail and fall
+     * back — at the cost of a full engine-init attempt first.
+     *
+     * So probe the directory rather than inferring from the SoC name: a
+     * Dimensity 7300 is on Google's supported-SoC list and still cannot run on
+     * its APU without these files present.
+     */
+    private fun handleNpuStatus(result: Result) {
+        val dir = File(context.applicationInfo.nativeLibraryDir)
+        val libs = dir.listFiles()?.map { it.name }?.filter { name ->
+            name.startsWith("libLiteRtDispatch") ||   // LiteRT vendor dispatch API
+                name.startsWith("libneuron_adapter") ||   // MediaTek NeuroPilot
+                name.startsWith("libneuronusdk_adapter") ||
+                name.startsWith("libQnnHtp")             // Qualcomm QAIRT
+        } ?: emptyList()
+
+        result.success(
+            mapOf(
+                "available" to libs.isNotEmpty(),
+                "libraries" to libs,
+                "soc" to if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) Build.SOC_MODEL else "",
+                "nativeLibraryDir" to dir.path,
+            )
+        )
     }
 
     private fun handleCreateEngine(call: MethodCall, result: Result) {

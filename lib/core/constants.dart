@@ -39,6 +39,8 @@ class AppConstants {
   static const String keyLocalModelRuntime = 'local_model_runtime';
   static const String keyLocalModelBackend = 'local_model_backend';
   static const String keyLiteRtPerformanceMode = 'litert_performance_mode';
+  static const String keyThinkingMode = 'thinking_mode';
+  static const String keyToolsEnabled = 'tools_enabled';
   static const String keyLiteRtGpuWarningAccepted =
       'litert_gpu_warning_accepted';
   static const String keyLiteRtGpuLoadPending = 'litert_gpu_load_pending';
@@ -63,6 +65,13 @@ class AppConstants {
   static const int defaultMaxTokens = 1024;
   static const int defaultContextSize = 2048;
   static const String defaultLiteRtPerformanceMode = 'auto_fast';
+
+  /// 'auto' leaves the model to its own habits; 'on'/'off' send the soft switch.
+  static const String defaultThinkingMode = 'auto';
+
+  /// Off by default: the tool catalogue costs context on every turn, and a small
+  /// model that has never been trained for tools answers worse with it present.
+  static const bool defaultToolsEnabled = false;
   static const int defaultImageSteps = 1;
   static const bool defaultImageGenForceCpu = true;
   static const int defaultImageGenGpuGuardMb = 1843; // 1.8 GB

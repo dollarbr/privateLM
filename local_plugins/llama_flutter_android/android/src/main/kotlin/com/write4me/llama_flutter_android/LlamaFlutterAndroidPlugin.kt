@@ -354,7 +354,6 @@ class LlamaFlutterAndroidPlugin : FlutterPlugin, LlamaHostApi {
 
                 val recommendedGpuLayers = computeRecommendedLayers(
                     vulkanSupported = vulkanSupported,
-                    gpuName = gpuName ?: "",
                     freeRamBytes = freeRamBytes,
                     deviceLocalMemoryBytes = deviceLocalMemory
                 )
@@ -399,15 +398,18 @@ class LlamaFlutterAndroidPlugin : FlutterPlugin, LlamaHostApi {
 
     private fun computeRecommendedLayers(
         vulkanSupported: Boolean,
-        gpuName: String,
         freeRamBytes: Long,
         deviceLocalMemoryBytes: Long
     ): Int {
         val GB = 1_073_741_824L
         val safeRam = (freeRamBytes * 0.7).toLong()
+        // No blanket vendor ban. A "Mali -> 0" rule used to live here, which zeroed
+        // every ARM GPU (a Mali-G615 on a Dimensity 7300 included) before the caller
+        // ever saw a number. Memory is what actually decides how many layers fit;
+        // whether the offload is worth it on a given GPU is the caller's call, and
+        // the user can always override the tier from Settings.
         return when {
             !vulkanSupported -> 0
-            gpuName.contains("Mali", ignoreCase = true) -> 0
             safeRam < GB -> 0                                          // < 1 GB — truly too low
             safeRam < 2 * GB && deviceLocalMemoryBytes < 3 * GB -> 0  // low RAM + low VRAM
             safeRam < 3 * GB || deviceLocalMemoryBytes < 2 * GB -> 16 // partial offload

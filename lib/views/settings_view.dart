@@ -150,6 +150,10 @@ class SettingsView extends GetView<SettingsController> {
               _sectionLabel(context, 'MODEL PARAMETERS'),
               _buildLiteRtCard(context, isDark),
               const SizedBox(height: 10),
+              _buildThinkingCard(context, isDark),
+              const SizedBox(height: 10),
+              _buildToolsCard(context, isDark),
+              const SizedBox(height: 10),
               _buildModelParametersCard(context, isDark),
               const SizedBox(height: 24),
               _sectionLabel(context, 'IMAGE GENERATION PARAMETERS'),
@@ -398,6 +402,75 @@ class SettingsView extends GetView<SettingsController> {
         ],
       ]);
     });
+  }
+
+  Widget _buildToolsCard(BuildContext context, bool isDark) {
+    final enabled = controller.toolsEnabled.value;
+    return _appleGroupedCard(context, isDark, children: [
+      _appleListTile(
+        context,
+        isDark,
+        leading: _iconBox(
+            isDark ? const Color(0xFF0A84FF) : AppColors.primary,
+            Icons.handyman_rounded),
+        title: 'Tools',
+        subtitle: enabled
+            ? 'The model can call the clock, calculator and device info'
+            : 'Off — the tool list is kept out of the prompt',
+        trailing: enabled
+            ? Icon(Icons.check,
+                size: 18,
+                color: isDark ? const Color(0xFF0A84FF) : AppColors.primary)
+            : null,
+        showDivider: false,
+        onTap: () => controller.setToolsEnabled(!enabled),
+      ),
+    ]);
+  }
+
+  Widget _buildThinkingCard(BuildContext context, bool isDark) {
+    // Reasoning models take a literal `/think` / `/no_think` in the prompt.
+    // Default is Auto — a model that never learned the token should not be sent
+    // one on every turn.
+    final modes = [
+      (
+        value: 'auto',
+        title: 'Thinking: Auto',
+        subtitle: "Send nothing — the model's own default",
+        icon: Icons.auto_awesome_rounded
+      ),
+      (
+        value: 'on',
+        title: 'Thinking: On',
+        subtitle: 'Ask for reasoning before the answer (/think)',
+        icon: Icons.psychology_rounded
+      ),
+      (
+        value: 'off',
+        title: 'Thinking: Off',
+        subtitle: 'Answer directly, no reasoning (/no_think)',
+        icon: Icons.bolt_rounded
+      ),
+    ];
+    return _appleGroupedCard(context, isDark, children: [
+      for (var i = 0; i < modes.length; i++)
+        _appleListTile(
+          context,
+          isDark,
+          leading: _iconBox(
+              isDark ? const Color(0xFF0A84FF) : AppColors.primary,
+              modes[i].icon),
+          title: modes[i].title,
+          subtitle: modes[i].subtitle,
+          trailing: controller.thinkingMode.value == modes[i].value
+              ? Icon(Icons.check,
+                  size: 18,
+                  color: isDark ? const Color(0xFF0A84FF) : AppColors.primary)
+              : null,
+          showDivider: i < modes.length - 1,
+          onTap: () => controller.setThinkingMode(modes[i].value),
+        ),
+    ]);
   }
 
   Widget _buildLiteRtCard(BuildContext context, bool isDark) {

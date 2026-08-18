@@ -8,6 +8,9 @@ import 'package:file_picker/file_picker.dart';
 import 'package:get/get.dart';
 import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
+
+import '../services/video_contact_sheet.dart';
+import '../services/video_frames_service.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:uuid/uuid.dart';
@@ -23,6 +26,9 @@ import '../services/local_image_service.dart';
 import '../services/app_log_service.dart';
 import '../services/image_generation_notification_service.dart';
 import '../services/document_extractor_service.dart';
+import '../services/tools/builtin_tools.dart';
+import '../services/tools/tool_call_parser.dart';
+import '../services/tools/tool_registry.dart';
 import '../utils/thought_parser.dart';
 
 const int _visionImageMaxSide = 768;
@@ -305,6 +311,12 @@ class ChatController extends GetxController {
           'aac',
           'ogg',
           'flac',
+          'mp4',
+          'mov',
+          'mkv',
+          'webm',
+          '3gp',
+          'avi',
           'txt',
           'md',
           'json',
@@ -331,9 +343,42 @@ class ChatController extends GetxController {
       if (extension.isEmpty || fileType == 'file') {
         Get.snackbar(
           'Unsupported file',
-          'Only images, audio, PDF, DOCX, and text/code files are supported.',
+          'Only images, video, audio, PDF, DOCX, and text/code files are supported.',
           snackPosition: SnackPosition.BOTTOM,
         );
+        return;
+      }
+
+      if (fileType == 'video') {
+        final path = file.path;
+        if (path == null) return;
+        // A video reaches the model as one contact sheet of frames: nothing
+        // local reads video, and the attachment path carries a single image.
+        final frames = await VideoFramesService.extract(path);
+        final sheet = frames.isEmpty
+            ? null
+            : await compute(VideoContactSheet.compose, frames);
+        if (sheet == null) {
+          Get.snackbar(
+            'Video not attached',
+            'No frames could be read from this video.',
+            snackPosition: SnackPosition.BOTTOM,
+          );
+          return;
+        }
+        final sheetPath = await _prepareVisionImagePath(
+          bytes: sheet,
+          originalName: '${file.name}.jpg',
+        );
+
+        selectedFileName.value = file.name;
+        selectedFilePath.value = sheetPath;
+        selectedFileType.value = 'video';
+        selectedFileSize.value = await File(sheetPath).length();
+        selectedFileContent.value = null;
+        selectedImagePath.value = sheetPath;
+        selectedImageBase64.value = null;
+        _checkVisionSupport();
         return;
       }
 
@@ -683,6 +728,68 @@ class ChatController extends GetxController {
         );
       }
 
+      // ── Tool hop ──────────────────────────────────────────────────────
+      // Exactly one round, never a loop. A small model handed its own tool
+      // output will happily call the same tool again forever; one hop covers
+      // the real case ("what time is it", "what is 12.5*3") and cannot spin.
+      if (Get.find<SettingsController>().toolsEnabled.value &&
+          generationId == _generationSerial) {
+        final call = ToolCallParser.parseFirst(rawResponse);
+        if (call != null) {
+          streamingResponse.value = 'Running ${call.name}…';
+          final toolResult = await _tools.execute(call.name, call.arguments);
+          Get.find<AppLogService>().info('Tool ${call.name} -> $toolResult');
+
+          if (generationId != _generationSerial) return;
+          streamingResponse.value = '';
+
+          // The call and its result go back as a normal exchange: none of the
+          // runtimes here share a tool-role message format, and plain text is
+          // what every one of them understands.
+          final toolHistory = [
+            ...history,
+            {'role': 'assistant', 'content': call.raw},
+            {'role': 'user', 'content': 'Tool result for ${call.name}: $toolResult'},
+          ];
+
+          if (inferenceMode == 'local') {
+            rawResponse = await Get.find<InferenceService>().generate(
+              prompt: 'Tool result for ${call.name}: $toolResult',
+              systemPrompt: _effectiveSystemPrompt,
+              conversationHistory: toolHistory,
+              source: 'chat',
+              onToken: (token) {
+                streamingResponse.value += token;
+                trackThoughtTiming();
+                _scrollToBottom();
+              },
+            );
+          } else {
+            rawResponse = await Get.find<CloudService>().sendMessage(
+              messages: [
+                {'role': 'system', 'content': _effectiveSystemPrompt},
+                ...toolHistory,
+              ],
+              onToken: (token) {
+                streamingResponse.value += token;
+                trackThoughtTiming();
+                _scrollToBottom();
+              },
+            );
+          }
+
+          // If it asked for another tool, show the reply as-is rather than
+          // hopping again — the user can see what it wanted and decide.
+          final second = ToolCallParser.parseFirst(rawResponse);
+          if (second != null) {
+            rawResponse = rawResponse.replaceAll(second.raw, '').trim();
+            if (rawResponse.isEmpty) {
+              rawResponse = 'Tool result for ${call.name}: $toolResult';
+            }
+          }
+        }
+      }
+
       if (thoughtStartedAt != null && thoughtDurationSeconds == null) {
         thoughtDurationSeconds =
             DateTime.now().difference(thoughtStartedAt!).inSeconds;
@@ -861,15 +968,29 @@ class ChatController extends GetxController {
     });
   }
 
+  /// Built once: the catalogue is static, and rebuilding it per turn would
+  /// re-create every closure for nothing.
+  final ToolRegistry _tools = buildDefaultToolRegistry();
+
   String get _effectiveSystemPrompt {
     final settings = Get.find<SettingsController>();
     final inference = Get.find<InferenceService>();
     final modelName = settings.inferenceMode.value == 'local'
         ? inference.loadedModelName.value
         : settings.selectedCloudModelName;
-    return settings.effectiveSystemPromptForModel(
+    var base = settings.effectiveSystemPromptForModel(
       modelName,
     );
+    if (settings.toolsEnabled.value) {
+      base = '$base\n\n${_tools.promptSection}';
+    }
+    // The soft switch goes in the system prompt, on its own line, so it survives
+    // the chat template intact and is not mistaken for part of the user's text.
+    return switch (settings.thinkingMode.value) {
+      'on' => '$base\n\n/think',
+      'off' => '$base\n\n/no_think',
+      _ => base,
+    };
   }
 
   String _attachmentTypeForExtension(String extension) {
@@ -893,6 +1014,7 @@ class ChatController extends GetxController {
     };
     if (imageExtensions.contains(extension)) return 'image';
     if (audioExtensions.contains(extension)) return 'audio';
+    if (VideoFramesService.isVideo(extension)) return 'video';
     if (extension == 'pdf') return 'pdf';
     if (extension == 'docx') return 'docx';
     if (textExtensions.contains(extension)) return 'text';
@@ -907,6 +1029,8 @@ class ChatController extends GetxController {
         return 'Summarize this PDF.';
       case 'docx':
         return 'Summarize this document.';
+      case 'video':
+        return 'Describe what happens in this video.';
       case 'audio':
         return 'Transcribe or analyze this audio.';
       case 'text':

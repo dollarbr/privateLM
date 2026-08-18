@@ -48,4 +48,8 @@ abstract class FlutterLitertLmPlatform extends PlatformInterface {
 
   /// Get the number of tokens in the given text.
   Future<int> countTokens(String engineId, String text);
+
+  /// Whether a vendor NPU dispatch driver is actually bundled with this build.
+  /// See [NpuStatus].
+  Future<Map<String, dynamic>> npuStatus();
 }

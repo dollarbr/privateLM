@@ -4,6 +4,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:flutter_litert_lm/flutter_litert_lm.dart';
 import 'package:llama_flutter_android/llama_flutter_android.dart';
 
+import 'acceleration.dart';
+
 /// Whether the current platform supports local inference.
 bool get supportsLocalInference => Platform.isAndroid || Platform.isIOS;
 
@@ -70,7 +72,7 @@ class InferenceEngine {
     _isLiteRt = false;
     _controller = LlamaController();
 
-    // ── GPU Detection ──
+    // ── Accelerator ladder (GGUF path: NPU is LiteRT-only, so GPU -> CPU here) ──
     int gpuLayers = 0;
     String gpuNameStr = '';
 
@@ -83,20 +85,13 @@ class InferenceEngine {
       print('[Inference]   Free RAM: ${gpu.freeRamBytes ~/ 1024 ~/ 1024}MB');
       print('[Inference]   Recommended layers: ${gpu.recommendedGpuLayers}');
 
-      if (gpu.vulkanSupported && gpu.recommendedGpuLayers > 0) {
-        final gpuNum = _extractGpuModel(gpu.gpuName);
-        if (gpuNum >= 700) {
-          gpuLayers = 99;
-          print('[Inference] ✓ High-end GPU ($gpuNum) → full offload');
-        } else if (gpuNum >= 650) {
-          gpuLayers = gpu.recommendedGpuLayers;
-          print('[Inference] ✓ Upper-mid GPU ($gpuNum) → $gpuLayers layers');
-        } else {
-          gpuLayers = 0;
-          print(
-              '[Inference] Mid-range GPU ($gpuNum) — CPU is faster, skipping GPU');
-        }
-      }
+      final plan = planAcceleration(
+        mode: liteRtPerformanceMode,
+        vulkanSupported: gpu.vulkanSupported,
+        recommendedGpuLayers: gpu.recommendedGpuLayers.toInt(),
+      );
+      gpuLayers = plan.gpuLayers;
+      print('[Inference] ${plan.reason}');
     } catch (e) {
       print('[Inference] GPU detection failed: $e — CPU fallback');
     }
@@ -181,10 +176,22 @@ class InferenceEngine {
 
     final tempDir = await getTemporaryDirectory();
     final cacheDir = Directory('${tempDir.path}/litert_cache');
-    final backend = forceCpu || performanceMode == 'cpu_safe'
-        ? LiteLmBackend.cpu
-        : LiteLmBackend.gpu;
-    final backendLabel = backend == LiteLmBackend.gpu ? 'GPU' : 'CPU';
+    // Full ladder here: NPU -> GPU -> CPU. Asking for NPU without a vendor
+    // dispatch driver bundled costs a failed engine init before LiteRT's own
+    // fallback kicks in, so probe for the driver instead of assuming the SoC
+    // can be reached.
+    final npu = forceCpu ? const NpuStatus(available: false) : await NpuStatus.probe();
+    if (!forceCpu) print('[Inference] $npu');
+    final tier = planLiteRtTier(
+      mode: forceCpu ? 'cpu_safe' : performanceMode,
+      npuAvailable: npu.available,
+    );
+    final backend = switch (tier) {
+      AccelTier.npu => LiteLmBackend.npu,
+      AccelTier.gpu => LiteLmBackend.gpu,
+      AccelTier.cpu => LiteLmBackend.cpu,
+    };
+    final backendLabel = tier.name.toUpperCase();
 
     try {
       onProgress?.call(0.05);
@@ -210,8 +217,8 @@ class InferenceEngine {
       return LoadResult(
         success: true,
         message: 'LiteRT-LM model loaded ($backendLabel backend).',
-        gpuName: backend == LiteLmBackend.gpu ? 'LiteRT GPU' : '',
-        gpuLayers: backend == LiteLmBackend.gpu ? 1 : 0,
+        gpuName: tier == AccelTier.cpu ? '' : 'LiteRT $backendLabel',
+        gpuLayers: tier == AccelTier.cpu ? 0 : 1,
         runtime: 'litert',
         backend: backend.name,
       );
@@ -242,8 +249,8 @@ class InferenceEngine {
             success: true,
             message:
                 'Model loaded in text-only mode. Its vision features are incompatible with the LiteRT engine (expected 1 signature, found multiple).',
-            gpuName: backend == LiteLmBackend.gpu ? 'LiteRT GPU' : '',
-            gpuLayers: backend == LiteLmBackend.gpu ? 1 : 0,
+            gpuName: tier == AccelTier.cpu ? '' : 'LiteRT $backendLabel',
+            gpuLayers: tier == AccelTier.cpu ? 0 : 1,
             runtime: 'litert',
             backend: backend.name,
           );
@@ -687,11 +694,6 @@ class InferenceEngine {
   }
 
   // ── Helpers ──
-
-  int _extractGpuModel(String gpuName) {
-    final match = RegExp(r'(\d{3})').firstMatch(gpuName.toLowerCase());
-    return match != null ? (int.tryParse(match.group(1)!) ?? 0) : 0;
-  }
 
   String _runtimeFor(String modelPath, String? modelRuntime) {
     final runtime = modelRuntime?.toLowerCase();

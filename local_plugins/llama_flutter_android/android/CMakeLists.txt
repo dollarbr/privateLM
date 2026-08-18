@@ -19,7 +19,40 @@ endif()
 # llama.cpp options
 set(GGML_CPU_AARCH64 ON CACHE BOOL "Enable ARM64 support")
 set(GGML_DOTPROD ON CACHE BOOL "Enable ARM NEON dot product")
-set(GGML_VULKAN OFF CACHE BOOL "Enable Vulkan GPU backend")
+# ggml-vulkan.cpp includes <vulkan/vulkan.hpp> and <spirv/unified1/spirv.hpp>.
+# The NDK sysroot carries the Vulkan *C* headers only (no vulkan.hpp) and no
+# SPIR-V headers at all, and taking the C++ ones from whatever the host distro
+# happens to ship mixes header versions with the sysroot's C headers. So the
+# matching Khronos sets (both vulkan-sdk-1.3.275, same as the NDK's loader) are
+# vendored here and pointed at explicitly -- the build is then identical on a
+# dev machine and on a CI runner, with nothing to apt-install first.
+set(VULKAN_HEADERS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/vulkan-headers)
+set(Vulkan_INCLUDE_DIR ${VULKAN_HEADERS_DIR} CACHE PATH "Khronos headers for the Vulkan backend")
+
+# Compile the shaders with the NDK's own glslc rather than whatever the host
+# happens to have. find_package(Vulkan COMPONENTS glslc REQUIRED) hard-fails when
+# the host has none -- which is the case on a stock CI runner -- and when the host
+# DOES have one, its version silently decides which shader variants get built.
+#
+# The NDK's glslc is older, so the cooperative-matrix, bfloat16 and
+# integer-dot-product shader sets are skipped. That is the right trade here: those
+# first two need hardware no Mali GPU has, and the whole set costs 27 MB of
+# embedded SPIR-V (59 MB of .so against 32 MB). To build them anyway on a machine
+# with a current Vulkan SDK, override this: -DVulkan_GLSLC_EXECUTABLE=/usr/bin/glslc
+if(ANDROID AND NOT DEFINED Vulkan_GLSLC_EXECUTABLE)
+    file(GLOB _ndk_shader_tools ${ANDROID_NDK}/shader-tools/*/glslc)
+    if(_ndk_shader_tools)
+        list(GET _ndk_shader_tools 0 Vulkan_GLSLC_EXECUTABLE)
+        set(Vulkan_GLSLC_EXECUTABLE ${Vulkan_GLSLC_EXECUTABLE} CACHE FILEPATH "glslc from the NDK")
+        message(STATUS "Using the NDK's glslc: ${Vulkan_GLSLC_EXECUTABLE}")
+    endif()
+endif()
+
+# Vulkan GPU backend. The NDK sysroot provides libvulkan.so to link against, and
+# llama.cpp's ggml-vulkan CMake cross-compiles vulkan-shaders-gen for the host on
+# its own, so this needs no toolchain patching -- unlike the llama.rn route, which
+# has to rename every ggml_* symbol to lm_ggml_*.
+set(GGML_VULKAN ON CACHE BOOL "Enable Vulkan GPU backend")
 set(GGML_OPENMP OFF CACHE BOOL "Disable OpenMP to avoid packaging libomp.so" FORCE)
 set(GGML_STATIC OFF CACHE BOOL "Build as shared library")
 set(BUILD_SHARED_LIBS ON CACHE BOOL "Build shared libraries")
@@ -36,7 +69,7 @@ add_subdirectory(src/main/cpp/llama.cpp)
 # On Android/NDK it must explicitly link libc++ or symbols such as operator new
 # and std::runtime_error stay unresolved during the native build.
 if(ANDROID)
-    foreach(target ggml-base ggml ggml-cpu llama)
+    foreach(target ggml-base ggml ggml-cpu ggml-vulkan llama)
         if(TARGET ${target})
             target_link_libraries(${target} PRIVATE c++_shared)
         endif()

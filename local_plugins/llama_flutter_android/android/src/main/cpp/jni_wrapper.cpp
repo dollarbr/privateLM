@@ -273,6 +273,19 @@ Java_com_write4me_llama_1flutter_1android_LlamaFlutterAndroidPlugin_nativeLoadMo
 
     // Context parameters with memory optimizations for low-end devices
     llama_context_params ctx_params = llama_context_default_params();
+
+    // Ask for what the caller wants, but never for more than the model was
+    // trained on: Settings lets any number be typed (a recurrent model such as
+    // RWKV keeps a fixed-size state, so a big number there costs nothing), and
+    // this is the one place every load funnels through, so the ceiling belongs
+    // here rather than in the UI. llama_n_ctx() reports the effective value
+    // back, which is what the context-usage bar already reads.
+    const int n_ctx_train = llama_model_n_ctx_train(g_model);
+    if (n_ctx_train > 0 && ctx_size > n_ctx_train) {
+        LOGI("Requested context %d exceeds the model's trained context %d — using %d",
+             (int)ctx_size, n_ctx_train, n_ctx_train);
+        ctx_size = n_ctx_train;
+    }
     ctx_params.n_ctx = ctx_size;
     ctx_params.n_threads = n_threads;
     ctx_params.n_threads_batch = n_threads;

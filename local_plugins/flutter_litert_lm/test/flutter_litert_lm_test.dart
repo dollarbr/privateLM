@@ -51,6 +51,14 @@ class MockFlutterLitertLmPlatform
 
   @override
   Future<int> countTokens(String engineId, String text) async => text.length;
+
+  @override
+  Future<Map<String, dynamic>> npuStatus() async => {
+        'available': false,
+        'libraries': <String>[],
+        'soc': 'mt6878',
+        'nativeLibraryDir': '/data/app/lib/arm64',
+      };
 }
 
 void main() {

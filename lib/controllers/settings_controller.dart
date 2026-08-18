@@ -49,6 +49,8 @@ class SettingsController extends GetxController {
   final maxTokens = 512.obs;
   final contextSize = 2048.obs;
   final liteRtPerformanceMode = AppConstants.defaultLiteRtPerformanceMode.obs;
+  final thinkingMode = AppConstants.defaultThinkingMode.obs;
+  final toolsEnabled = AppConstants.defaultToolsEnabled.obs;
   final imageSteps = 1.obs;
   final imageGenForceCpu = AppConstants.defaultImageGenForceCpu.obs;
   final imageGenBackend = Backend.cpu.obs;
@@ -193,6 +195,16 @@ class SettingsController extends GetxController {
     contextSize.value = _hive.getSetting(AppConstants.keyContextSize,
             defaultValue: AppConstants.defaultContextSize) ??
         AppConstants.defaultContextSize;
+    toolsEnabled.value = _hive.getSetting<bool>(
+          AppConstants.keyToolsEnabled,
+          defaultValue: AppConstants.defaultToolsEnabled,
+        ) ??
+        AppConstants.defaultToolsEnabled;
+    thinkingMode.value = _hive.getSetting<String>(
+          AppConstants.keyThinkingMode,
+          defaultValue: AppConstants.defaultThinkingMode,
+        ) ??
+        AppConstants.defaultThinkingMode;
     liteRtPerformanceMode.value = _hive.getSetting(
           AppConstants.keyLiteRtPerformanceMode,
           defaultValue: AppConstants.defaultLiteRtPerformanceMode,
@@ -662,14 +674,23 @@ class SettingsController extends GetxController {
     await _hive.setSetting(AppConstants.keyContextSize, value);
   }
 
-  /// Maximum value allowed for manual Max Tokens entry.
-  static const maxManualMaxTokens = 16384;
+  // No ceiling on manual entry. A fixed 16384 cap assumed every architecture
+  // pays for context the same way, which transformers do and recurrent models
+  // (RWKV, Mamba) do not — their state is a fixed size, so a larger number costs
+  // nothing. What a model can actually take is a property of the model, not of
+  // this dialog: the engine clamps the request down to the model's trained
+  // context at load time and reports back the value it really used.
+  //
+  // Kept as a sanity bound on typing, not as a policy: 8 million tokens is far
+  // past any GGUF in existence and still stops a stray keypress from turning
+  // into a 10-digit allocation.
+  static const maxManualMaxTokens = 8388608;
 
   /// Threshold above which a memory warning is shown (Max Tokens / Context Size).
   static const memoryWarningThreshold = 8192;
 
-  /// Maximum value allowed for manual Context Size entry.
-  static const maxManualContextSize = 16384;
+  /// See [maxManualMaxTokens] — same reasoning.
+  static const maxManualContextSize = 8388608;
 
   /// Shows a manual-entry dialog for Max Tokens or Context Size.
   /// [field] must be either 'maxTokens' or 'contextSize'.
@@ -849,6 +870,25 @@ class SettingsController extends GetxController {
       }
       return value;
     });
+  }
+
+  /// Reasoning models expose a soft switch in the prompt — Qwen3 and the models
+  /// that copied its convention read a literal `/think` or `/no_think` and obey
+  /// it. 'auto' sends nothing, which is the only safe default: a model that has
+  /// never seen the token would otherwise be handed a stray word every turn.
+  Future<void> setToolsEnabled(bool enabled) async {
+    toolsEnabled.value = enabled;
+    await _hive.setSetting(AppConstants.keyToolsEnabled, enabled);
+  }
+
+  Future<void> setThinkingMode(String mode) async {
+    final normalized = switch (mode) {
+      'on' => 'on',
+      'off' => 'off',
+      _ => AppConstants.defaultThinkingMode,
+    };
+    thinkingMode.value = normalized;
+    await _hive.setSetting(AppConstants.keyThinkingMode, normalized);
   }
 
   Future<void> setLiteRtPerformanceMode(String mode) async {

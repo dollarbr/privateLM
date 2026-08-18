@@ -1,0 +1,70 @@
+# A debug APK you can install, on every push — no tag, no release.
+#
+# release.yml only fires on a version tag, which is the wrong loop for trying a
+# native change on a real phone. This one hands you an artifact per push.
+#
+# arm64 only, on purpose: the llama.cpp sources are vendored and compiled from
+# scratch by CMake (now including the Vulkan backend and its ~300 shader
+# objects), so every extra ABI is another full native build on the runner.
+name: Debug APK
+
+on:
+  push:
+    branches-ignore: []
+  workflow_dispatch:
+
+concurrency:
+  group: debug-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: "zulu"
+          java-version: 17
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      - run: flutter analyze --no-fatal-infos --no-fatal-warnings
+
+      - run: flutter test
+
+      - name: Build debug APK
+        env:
+          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -Dfile.encoding=utf-8 -Dkotlin.daemon.jvm.options=-Xmx4g"
+        run: flutter build apk --debug --target-platform android-arm64
+
+      - name: Name the APK after the commit
+        run: |
+          cd build/app/outputs/flutter-apk
+          ls -1
+          mv app-debug.apk "PrivateLM-debug-${GITHUB_SHA::7}.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: privatelm-debug-apk
+          path: build/app/outputs/flutter-apk/PrivateLM-debug-*.apk
+          if-no-files-found: error
+
+      - name: Upload native build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          path: |
+            build/**/*.log
+            local_plugins/**/.cxx/**/*.log
+          name: native-build-logs
+          if-no-files-found: ignore
