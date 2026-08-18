@@ -230,6 +230,15 @@ class ModelController extends GetxController {
     }
   }
 
+  /// What to call this model's extra inputs, for badges and chips.
+  ///
+  /// "Vision" undersells the LiteRT-LM multimodal files: gemma-3n and gemma-4
+  /// carry an audio encoder in the same file and take speech as readily as
+  /// images. The internal flag stays named `vision` because it is what gates
+  /// the encoder in the LiteRT config — this is the user-facing word only.
+  String modalityLabel(AiModel model) =>
+      isLiteRtModel(model) ? 'MULTIMODAL' : 'VISION';
+
   bool isVisionModel(AiModel model) {
     if (!isLiteRtModel(model)) return false;
     final lower =

@@ -178,7 +178,7 @@ class ModelView extends GetView<ModelController> {
       'general': 'General',
       'image': 'Image Gen',
       'uncensored': 'Uncensored',
-      'vision': 'Vision',
+      'vision': 'Multimodal',
     };
     return Obx(() {
       final selected = controller.localFilter.value.isEmpty
@@ -459,13 +459,15 @@ class ModelView extends GetView<ModelController> {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
-                  if (inference.isGpuAccelerated.value) ...[
+                  if (inference.loadedBackend.value.isNotEmpty) ...[
                     const SizedBox(height: 2),
                     Text(
-                      '⚡ GPU: ${inference.gpuName.value}',
+                      _accelLabel(inference),
                       style: GoogleFonts.firaCode(
                         fontSize: 10,
-                        color: AppColors.success,
+                        color: inference.isGpuAccelerated.value
+                            ? AppColors.success
+                            : Theme.of(context).hintColor,
                         fontWeight: FontWeight.w500,
                       ),
                       maxLines: 1,
@@ -480,6 +482,23 @@ class ModelView extends GetView<ModelController> {
         ),
       );
     });
+  }
+
+  /// One line naming the rung of the NPU > GPU > CPU ladder this model landed
+  /// on. Shown for every backend, not just GPU — "it fell back to CPU" is the
+  /// case worth seeing.
+  String _accelLabel(InferenceService inference) {
+    switch (inference.loadedBackend.value) {
+      case 'npu':
+        return '◆ NPU';
+      case 'gpu':
+        final layers = inference.gpuLayersUsed.value;
+        final name = inference.gpuName.value;
+        final where = name.isEmpty ? 'GPU' : 'GPU: $name';
+        return layers > 0 ? '⚡ $where ($layers layers)' : '⚡ $where';
+      default:
+        return '▪ CPU';
+    }
   }
 
   Widget _buildActiveCloudBanner(BuildContext context) {
@@ -2044,7 +2063,7 @@ class ModelView extends GetView<ModelController> {
       badges.add((label: 'UNCENSORED', color: AppColors.error));
     }
     if (controller.isVisionModel(model)) {
-      badges.add((label: 'VISION', color: AppColors.info));
+      badges.add((label: controller.modalityLabel(model), color: AppColors.info));
     }
     if (controller.isImageModel(model)) {
       badges.add((label: 'IMAGE', color: AppColors.primary));
@@ -3483,7 +3502,7 @@ class _VisionToggle extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'Vision Model',
+                    'Multimodal Model',
                     style: GoogleFonts.inter(
                       fontSize: 14,
                       fontWeight: FontWeight.w600,
@@ -3491,7 +3510,7 @@ class _VisionToggle extends StatelessWidget {
                     ),
                   ),
                   Text(
-                    'Supports image input (multimodal)',
+                    'Image and audio input — LiteRT-LM only',
                     style: GoogleFonts.inter(
                       fontSize: 11,
                       color: isDark
