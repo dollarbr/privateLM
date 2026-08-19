@@ -29,9 +29,20 @@ set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-z,max-page-size
 # SIGILL, not a slow path. Shipping this needs ggml's runtime dispatch
 # (GGML_CPU_ALL_VARIANTS + GGML_BACKEND_DL) instead of a raised baseline.
 if(ANDROID_ABI STREQUAL "arm64-v8a")
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -march=armv8.2-a+crc+dotprod+fp16")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=armv8.2-a+crc+dotprod+fp16")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=armv8.2-a+crc+dotprod+fp16")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=armv8.2-a+crc+dotprod+fp16")
 endif()
+
+# The Android Gradle plugin builds the native side as RelWithDebInfo, and CMake
+# appends CMAKE_<LANG>_FLAGS_<CONFIG> *after* CMAKE_<LANG>_FLAGS. An -O3 in the
+# global flags is therefore overruled by the config's -O2 -- the last -O on the
+# command line is the one clang honours. A release build of ggml-cpu.c came out
+# as "-O3 -march=... -O2 -g -DNDEBUG", i.e. -O2. Set the per-config flags so the
+# quantized kernels get the unrolling they are written for.
+foreach(cfg RELEASE RELWITHDEBINFO MINSIZEREL)
+    string(REGEX REPLACE "-O[0-9s]" "-O3" CMAKE_C_FLAGS_${cfg} "${CMAKE_C_FLAGS_${cfg}}")
+    string(REGEX REPLACE "-O[0-9s]" "-O3" CMAKE_CXX_FLAGS_${cfg} "${CMAKE_CXX_FLAGS_${cfg}}")
+endforeach()
 
 # llama.cpp options
 set(GGML_CPU_AARCH64 ON CACHE BOOL "Enable ARM64 support")
