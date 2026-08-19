@@ -6,6 +6,7 @@
 #include <cstring>
 #include <cstdarg>
 #include <fstream>
+#include <chrono>
 #include <mutex>
 #include <deque>
 #include <android/log.h>
@@ -767,10 +768,31 @@ Java_com_write4me_llama_1flutter_1android_LlamaFlutterAndroidPlugin_nativeGenera
              n_incoming, mtmd_input_chunks_size(chunks));
         make_room_for((int) n_incoming);
 
+        // Per chunk rather than mtmd_helper_eval_chunks() over the lot, so the
+        // log says which part of a multimodal prefill the time went to. The
+        // whole-list helper is a black box that can run for a minute, and the
+        // encoder and the decode of its output have completely different fixes.
+        // Same breakdown llama.rn prints, which makes the two directly
+        // comparable on the same prompt.
         llama_pos new_n_past = g_n_past;
-        const int32_t eval_rc = mtmd_helper_eval_chunks(
-            g_mtmd, g_ctx, chunks, g_n_past, /* seq_id */ 0,
-            max_batch_size, /* logits_last */ true, &new_n_past);
+        int32_t eval_rc = 0;
+        const size_t n_chunks = mtmd_input_chunks_size(chunks);
+        for (size_t i = 0; i < n_chunks && eval_rc == 0; i++) {
+            const mtmd_input_chunk* chunk = mtmd_input_chunks_get(chunks, i);
+            const mtmd_input_chunk_type type = mtmd_input_chunk_get_type(chunk);
+            const char* kind = type == MTMD_INPUT_CHUNK_TYPE_TEXT  ? "TEXT"
+                             : type == MTMD_INPUT_CHUNK_TYPE_IMAGE ? "IMAGE"
+                                                                   : "AUDIO";
+            const size_t n_tok = mtmd_input_chunk_get_n_tokens(chunk);
+            const auto t0 = std::chrono::steady_clock::now();
+            eval_rc = mtmd_helper_eval_chunk_single(
+                g_mtmd, g_ctx, chunk, new_n_past, /* seq_id */ 0,
+                max_batch_size, /* logits_last */ i + 1 == n_chunks, &new_n_past);
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t0).count();
+            LOGI("Chunk %zu/%zu: type=%s, n_tokens=%zu, %lld ms",
+                 i + 1, n_chunks, kind, n_tok, (long long) ms);
+        }
 
         mtmd_input_chunks_free(chunks);
 
