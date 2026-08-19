@@ -51,11 +51,23 @@ class LogView extends StatelessWidget {
         title: Text('Logs', style: GoogleFonts.inter(fontWeight: FontWeight.w700)),
         actions: [
           IconButton(
-            tooltip: 'Share logs',
-            icon: Icon(Icons.ios_share_rounded, size: 20, color: isDark ? const Color(0xFF0A84FF) : AppColors.primary),
+            tooltip: 'Copy important logs',
+            icon: Icon(Icons.copy_rounded, size: 20, color: Theme.of(context).hintColor),
             onPressed: () async {
               await logs.copyImportantLogs();
               Get.snackbar('Copied', 'Important logs copied to clipboard.', snackPosition: SnackPosition.BOTTOM);
+            },
+          ),
+          IconButton(
+            // The clipboard only carries this session's important entries.
+            // A crash report needs the file: full history, native ggml lines
+            // included, and whatever the run before the crash wrote.
+            tooltip: 'Share full log file',
+            icon: Icon(Icons.ios_share_rounded, size: 20, color: isDark ? const Color(0xFF0A84FF) : AppColors.primary),
+            onPressed: () async {
+              if (!await logs.shareLogFile()) {
+                Get.snackbar('No Log File', 'Nothing has been written to disk yet.', snackPosition: SnackPosition.BOTTOM);
+              }
             },
           ),
           IconButton(
@@ -71,12 +83,19 @@ class LogView extends StatelessWidget {
           Container(
             height: 52,
             padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: Obx(() => ListView.builder(
+            child: Obx(() {
+              // Read the filter here, not inside itemBuilder: a lazy builder
+              // runs during layout, outside this closure, so GetX sees an Obx
+              // that touched no observable and reports "improper use of GetX".
+              // That error then lands in the very list this screen shows,
+              // which is why it looked permanent.
+              final selected = selectedFilter.value;
+              return ListView.builder(
               scrollDirection: Axis.horizontal,
               itemCount: filters.length,
               itemBuilder: (context, index) {
                 final filter = filters[index];
-                final isSelected = selectedFilter.value == filter;
+                final isSelected = selected == filter;
                 final color = filter == 'ALL'
                     ? (isDark ? Colors.white : Colors.black)
                     : levelColor(filter);
@@ -103,7 +122,8 @@ class LogView extends StatelessWidget {
                   ),
                 );
               },
-            )),
+              );
+            }),
           ),
           // Log list
           Expanded(
