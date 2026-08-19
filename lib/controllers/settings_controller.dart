@@ -60,6 +60,8 @@ class SettingsController extends GetxController {
   final customSearchTokenController = TextEditingController();
   final imageSteps = 1.obs;
   final imageGenForceCpu = AppConstants.defaultImageGenForceCpu.obs;
+  final cpuThreads = AppConstants.defaultCpuThreads.obs;
+  final mmprojForceCpu = AppConstants.defaultMmprojForceCpu.obs;
   final imageGenBackend = Backend.cpu.obs;
   final imageGpuVendor = 'detecting'.obs;
   final imageGenGpuGuardMb = AppConstants.defaultImageGenGpuGuardMb.obs;
@@ -232,6 +234,13 @@ class SettingsController extends GetxController {
     imageSteps.value = _hive.getSetting(AppConstants.keyImageSteps,
             defaultValue: AppConstants.defaultImageSteps) ??
         AppConstants.defaultImageSteps;
+    cpuThreads.value = _hive.getSetting<int>(AppConstants.keyCpuThreads,
+            defaultValue: AppConstants.defaultCpuThreads) ??
+        AppConstants.defaultCpuThreads;
+    mmprojForceCpu.value = _hive.getSetting<bool>(
+            AppConstants.keyMmprojForceCpu,
+            defaultValue: AppConstants.defaultMmprojForceCpu) ??
+        AppConstants.defaultMmprojForceCpu;
     imageGenForceCpu.value = _hive.getSetting(AppConstants.keyImageGenForceCpu,
             defaultValue: AppConstants.defaultImageGenForceCpu) ??
         AppConstants.defaultImageGenForceCpu;
@@ -944,6 +953,17 @@ class SettingsController extends GetxController {
   Future<void> setImageSteps(int value) async {
     imageSteps.value = value;
     await _hive.setSetting(AppConstants.keyImageSteps, value);
+  }
+
+  /// [value] is a thread count, or 0 for "half the cores".
+  Future<void> setCpuThreads(int value) async {
+    cpuThreads.value = value < 0 ? 0 : value;
+    await _hive.setSetting(AppConstants.keyCpuThreads, cpuThreads.value);
+  }
+
+  Future<void> setMmprojForceCpu(bool value) async {
+    mmprojForceCpu.value = value;
+    await _hive.setSetting(AppConstants.keyMmprojForceCpu, value);
   }
 
   Future<void> setImageGenForceCpu(bool value) async {

@@ -153,6 +153,9 @@ class SettingsView extends GetView<SettingsController> {
               const SizedBox(height: 24),
               _sectionLabel(context, 'MODEL PARAMETERS'),
               _buildLiteRtCard(context, isDark),
+              const SizedBox(height: 24),
+              _sectionLabel(context, 'COMPUTE'),
+              _buildComputeCard(context, isDark),
               const SizedBox(height: 10),
               if (Platform.isAndroid) ...[
                 _buildNpuCard(context, isDark),
@@ -607,6 +610,64 @@ class SettingsView extends GetView<SettingsController> {
         ]);
       },
     );
+  }
+
+  /// CPU threads and the vision-encoder backend.
+  ///
+  /// Both are exposed rather than decided for the user because both are
+  /// per-device facts we cannot know: ggml syncs threads at every op, so on a
+  /// big.LITTLE phone more threads can be slower, and whether a projector runs
+  /// faster on the GPU depends on how much of the ViT that driver actually
+  /// implements.
+  Widget _buildComputeCard(BuildContext context, bool isDark) {
+    final cores = Platform.numberOfProcessors;
+    final half = (cores ~/ 2).clamp(2, 6);
+    final accent = isDark ? const Color(0xFF0A84FF) : AppColors.primary;
+    return Obx(() {
+      final selected = controller.cpuThreads.value;
+      final options = <({int value, String title, String subtitle})>[
+        (
+          value: 0,
+          title: 'Auto — half the cores ($half)',
+          subtitle: 'Leaves the little cores out of the sync barrier',
+        ),
+        (
+          value: cores,
+          title: 'All cores ($cores)',
+          subtitle: 'More threads, but the slowest core paces every op',
+        ),
+      ];
+      return _appleGroupedCard(context, isDark, children: [
+        for (var i = 0; i < options.length; i++)
+          _appleListTile(
+            context,
+            isDark,
+            leading: _iconBox(accent, Icons.developer_board_rounded),
+            title: options[i].title,
+            subtitle: options[i].subtitle,
+            trailing: selected == options[i].value
+                ? Icon(Icons.check, size: 18, color: accent)
+                : null,
+            onTap: () => controller.setCpuThreads(options[i].value),
+          ),
+        _appleListTile(
+          context,
+          isDark,
+          leading: _iconBox(accent, Icons.image_search_rounded),
+          title: 'Vision encoder on CPU',
+          subtitle: controller.mmprojForceCpu.value
+              ? 'Projector runs on the CPU even when layers are on the GPU'
+              : 'Projector follows the model onto the GPU',
+          trailing: Switch(
+            value: controller.mmprojForceCpu.value,
+            onChanged: controller.setMmprojForceCpu,
+          ),
+          showDivider: false,
+          onTap: () =>
+              controller.setMmprojForceCpu(!controller.mmprojForceCpu.value),
+        ),
+      ]);
+    });
   }
 
   Widget _buildLiteRtCard(BuildContext context, bool isDark) {

@@ -57,6 +57,9 @@ class AppConstants {
   static const String keyServerUseApiKey = 'server_use_api_key';
   static const String keyImageSteps = 'image_steps';
   static const String keyImageGenForceCpu = 'image_gen_force_cpu';
+  /// CPU threads for llama.cpp. 0 means "half the cores".
+  static const String keyCpuThreads = 'cpu_threads';
+  static const String keyMmprojForceCpu = 'mmproj_force_cpu';
   static const String keyImageGenBackend = 'image_gen_backend';
   static const String keyImageGenGpuGuardMb = 'image_gen_gpu_guard_mb';
   static const String keyImageGenSize = 'image_gen_size';
@@ -85,6 +88,13 @@ class AppConstants {
   ];
   static const int defaultImageSteps = 1;
   static const bool defaultImageGenForceCpu = true;
+  /// 0 = half the cores. See the thread-tuning note in inference_android.dart.
+  static const int defaultCpuThreads = 0;
+  /// Default true: measured on a Mali-G615, encoding one image took 197s with
+  /// the projector on the GPU against 84s on four CPU threads. ggml-vulkan
+  /// falls back per-op for the ViT, so the "GPU" path spends its time copying
+  /// tensors. Switchable in Settings, because this is a per-driver fact.
+  static const bool defaultMmprojForceCpu = true;
   static const int defaultImageGenGpuGuardMb = 1843; // 1.8 GB
   static const int defaultImageGenSize = 0; // 0 = Auto recommended
   static const double defaultFontScale =
@@ -139,6 +149,66 @@ class AppConstants {
       'description': 'Reasoning-focused LiteRT-LM model with int8 quantization',
       'template': 'litert',
       'runtime': 'litert',
+    },
+    {
+      'name': 'Gemma 4 E2B Instruct (GGUF)',
+      'filename': 'gemma-4-E2B-it-Q4_0.gguf',
+      'url':
+          'https://huggingface.co/ggml-org/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf',
+      'size': '2.65 GB',
+      'description':
+          'Multimodal — text, images and audio, with GPU offload. Needs a 0.52 GB projector',
+      'template': 'gemma',
+      'runtime': 'llama',
+      'vision': 'true',
+      'mmprojUrl':
+          'https://huggingface.co/ggml-org/gemma-4-E2B-it-GGUF/resolve/main/mmproj-gemma-4-E2B-it-Q8_0.gguf',
+      'mmprojFilename': 'mmproj-gemma-4-E2B-it-Q8_0.gguf',
+    },
+    {
+      'name': 'Qwen2.5-Omni 3B (GGUF)',
+      'filename': 'Qwen2.5-Omni-3B-Q4_K_M.gguf',
+      'url':
+          'https://huggingface.co/ggml-org/Qwen2.5-Omni-3B-GGUF/resolve/main/Qwen2.5-Omni-3B-Q4_K_M.gguf',
+      'size': '1.96 GB',
+      'description':
+          'Omni — images and audio in, text out. Needs a 1.43 GB projector',
+      'template': 'chatml',
+      'runtime': 'llama',
+      'vision': 'true',
+      'mmprojUrl':
+          'https://huggingface.co/ggml-org/Qwen2.5-Omni-3B-GGUF/resolve/main/mmproj-Qwen2.5-Omni-3B-Q8_0.gguf',
+      'mmprojFilename': 'mmproj-Qwen2.5-Omni-3B-Q8_0.gguf',
+    },
+    {
+      'name': 'Qwen2.5-VL 3B Instruct (GGUF)',
+      'filename': 'Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf',
+      'url':
+          'https://huggingface.co/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF/resolve/main/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf',
+      'size': '1.80 GB',
+      'description':
+          'Vision — strong at reading text in images. Needs a 0.79 GB projector',
+      'template': 'chatml',
+      'runtime': 'llama',
+      'vision': 'true',
+      'mmprojUrl':
+          'https://huggingface.co/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF/resolve/main/mmproj-Qwen2.5-VL-3B-Instruct-Q8_0.gguf',
+      'mmprojFilename': 'mmproj-Qwen2.5-VL-3B-Instruct-Q8_0.gguf',
+    },
+    {
+      'name': 'SmolVLM2 500M Video (GGUF)',
+      'filename': 'SmolVLM2-500M-Video-Instruct-Q8_0.gguf',
+      'url':
+          'https://huggingface.co/ggml-org/SmolVLM2-500M-Video-Instruct-GGUF/resolve/main/SmolVLM2-500M-Video-Instruct-Q8_0.gguf',
+      'size': '0.41 GB',
+      'description':
+          'Vision — tiny and quick, for trying image input cheaply. 0.10 GB projector',
+      'template': 'chatml',
+      'runtime': 'llama',
+      'vision': 'true',
+      'mmprojUrl':
+          'https://huggingface.co/ggml-org/SmolVLM2-500M-Video-Instruct-GGUF/resolve/main/mmproj-SmolVLM2-500M-Video-Instruct-Q8_0.gguf',
+      'mmprojFilename': 'mmproj-SmolVLM2-500M-Video-Instruct-Q8_0.gguf',
     },
     {
       'name': 'Gemma 4 E2B Instruct (LiteRT-LM)',
