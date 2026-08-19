@@ -237,10 +237,12 @@ class ModelController extends GetxController {
   /// images. The internal flag stays named `vision` because it is what gates
   /// the encoder in the LiteRT config — this is the user-facing word only.
   String modalityLabel(AiModel model) =>
-      isLiteRtModel(model) ? 'MULTIMODAL' : 'VISION';
+      isLiteRtModel(model) || model.needsMmproj ? 'MULTIMODAL' : 'VISION';
 
   bool isVisionModel(AiModel model) {
-    if (!isLiteRtModel(model)) return false;
+    // GGUF models see through a projector: without a paired mmproj file the
+    // weights alone cannot read an image, however the model is named.
+    if (!isLiteRtModel(model)) return model.needsMmproj;
     final lower =
         '${model.name} ${model.filename} ${model.description}'.toLowerCase();
     return model.isVision || AiModel.hasVisionMarker(lower);
@@ -335,6 +337,8 @@ class ModelController extends GetxController {
     String template = 'chatml',
     String? size,
     bool isVision = false,
+    String mmprojUrl = '',
+    String mmprojFilename = '',
   }) async {
     final resolvedFilename = (filename == null || filename.trim().isEmpty)
         ? filenameFromUrl(url)
@@ -360,6 +364,8 @@ class ModelController extends GetxController {
               ) ==
               AiModel.runtimeLiteRt,
       isCustom: true,
+      mmprojUrl: mmprojUrl.trim(),
+      mmprojFilename: mmprojFilename.trim(),
     );
 
     customModels.removeWhere((m) => m.filename == model.filename);
@@ -394,6 +400,18 @@ class ModelController extends GetxController {
         url: model.url,
         filename: model.filename,
       );
+      // A multimodal GGUF is two files, so "download" has to mean both:
+      // fetching the projector only at load time makes the first load stall
+      // on a second transfer the user never asked for, or silently come up
+      // text-only if it fails. The load path keeps its own fetch as a
+      // fallback, for models added before this and for a failed projector.
+      if (model.needsMmproj &&
+          !await _download.isModelDownloaded(model.mmprojFilename)) {
+        await _download.downloadModel(
+          url: model.mmprojUrl,
+          filename: model.mmprojFilename,
+        );
+      }
       await refreshDownloaded();
     } catch (e) {
       Get.find<AppLogService>().error('Model download failed', details: e);
@@ -613,11 +631,40 @@ class ModelController extends GetxController {
             isError ? const Duration(seconds: 6) : const Duration(seconds: 2),
       );
     } else {
+      // A multimodal GGUF is two files. Fetch the projector before loading, so
+      // a first run on a fresh install still comes up with vision rather than
+      // silently downgrading to text.
+      String? mmprojPath;
+      if (model != null && model.needsMmproj) {
+        try {
+          if (!await _download.isModelDownloaded(model.mmprojFilename)) {
+            // Only queue it if nothing is fetching it already: downloadModel
+            // now starts the projector alongside the weights, so loading
+            // while that is still in flight would enqueue the same file twice.
+            if (!isDownloadingModel(model.mmprojFilename)) {
+              print('[ModelController] Projector missing, downloading...');
+              await _download.downloadModel(
+                  url: model.mmprojUrl, filename: model.mmprojFilename);
+            }
+            // On Android the call above only queues the transfer, so without
+            // this the load would hand mtmd a path to a file that does not
+            // exist yet and come up text-only.
+            if (!await _download.awaitDownload(model.mmprojFilename)) {
+              throw Exception('Projector download did not complete');
+            }
+          }
+          mmprojPath = await _download.modelPath(model.mmprojFilename);
+        } catch (e) {
+          print('[ModelController] Projector download failed: $e');
+        }
+      }
+
       final result = await _inference.loadModel(
         path,
         modelName: filename,
         modelRuntime: model?.runtime,
         enableLiteRtVision: model == null ? false : isVisionModel(model),
+        mmprojPath: mmprojPath,
       );
       if (_inference.isModelLoaded.value) {
         final fallbackToText = result.toLowerCase().contains('text-only');

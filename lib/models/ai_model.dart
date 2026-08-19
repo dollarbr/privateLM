@@ -19,6 +19,12 @@ class AiModel {
   final String template;
   final String runtime;
   final bool isVision;
+
+  /// Multimodal projector for GGUF models: the second file that turns pixels
+  /// or audio samples into embeddings. Empty for models that have none, and
+  /// always empty for LiteRT, which carries its encoders inside the .litertlm.
+  final String mmprojUrl;
+  final String mmprojFilename;
   final bool isImported;
   final bool isCustom;
 
@@ -33,6 +39,8 @@ class AiModel {
     this.isVision = false,
     this.isImported = false,
     this.isCustom = false,
+    this.mmprojUrl = '',
+    this.mmprojFilename = '',
   }) : runtime = runtime ?? runtimeFromFilename(filename, template: template);
 
   factory AiModel.fromMap(Map<String, String> map) => AiModel(
@@ -46,6 +54,8 @@ class AiModel {
         isVision: map['vision'] == 'true',
         isImported: map['imported'] == 'true',
         isCustom: map['custom'] == 'true',
+        mmprojUrl: map['mmprojUrl'] ?? '',
+        mmprojFilename: map['mmprojFilename'] ?? '',
       );
 
   Map<String, String> toMap() => {
@@ -59,7 +69,12 @@ class AiModel {
         if (isVision) 'vision': 'true',
         if (isImported) 'imported': 'true',
         if (isCustom) 'custom': 'true',
+        if (mmprojUrl.isNotEmpty) 'mmprojUrl': mmprojUrl,
+        if (mmprojFilename.isNotEmpty) 'mmprojFilename': mmprojFilename,
       };
+
+  /// True when this model needs a projector alongside the weights.
+  bool get needsMmproj => mmprojFilename.isNotEmpty;
 
   static String runtimeFromFilename(String filename, {String? template}) {
     final lower = filename.toLowerCase();
@@ -81,6 +96,8 @@ class AiModel {
     bool? isVision,
     bool? isImported,
     bool? isCustom,
+    String? mmprojUrl,
+    String? mmprojFilename,
   }) {
     return AiModel(
       name: name ?? this.name,
@@ -93,6 +110,8 @@ class AiModel {
       isVision: isVision ?? this.isVision,
       isImported: isImported ?? this.isImported,
       isCustom: isCustom ?? this.isCustom,
+      mmprojUrl: mmprojUrl ?? this.mmprojUrl,
+      mmprojFilename: mmprojFilename ?? this.mmprojFilename,
     );
   }
 }

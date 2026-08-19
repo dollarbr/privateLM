@@ -23,11 +23,15 @@ Future<List<String>> getDownloadedModels(String modelsDir) async {
   if (!await dir.exists()) return [];
   return dir
       .listSync()
-      .where((f) =>
-          f.path.endsWith('.gguf') ||
-          f.path.endsWith('.litertlm') ||
-          f.path.endsWith('.safetensors'))
       .map((f) => f.path.split('/').last)
+      .where((name) =>
+          (name.endsWith('.gguf') ||
+              name.endsWith('.litertlm') ||
+              name.endsWith('.safetensors')) &&
+          // A projector is a .gguf too, but it is half of a pair, not a model:
+          // llama_model_load rejects it outright ("CLIP cannot be used as main
+          // model"), so listing it only offers the user a guaranteed failure.
+          !name.startsWith('mmproj-'))
       .toList();
 }
 

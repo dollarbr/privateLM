@@ -4,6 +4,7 @@ import 'package:get/get.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../controllers/cloud_model_controller.dart';
 import '../controllers/model_controller.dart';
+import 'hf_search_sheet.dart';
 import '../controllers/settings_controller.dart';
 import '../core/colors.dart';
 import '../models/ai_model.dart';
@@ -147,6 +148,17 @@ class ModelView extends GetView<ModelController> {
     final inference = Get.find<InferenceService>();
     return Row(
       children: [
+        Expanded(
+          child: Obx(() => OutlinedButton.icon(
+                onPressed: controller.isImporting.value ||
+                        inference.isLoadingModel.value
+                    ? null
+                    : () => HfSearchSheet.show(context),
+                icon: const Icon(Icons.search, size: 16),
+                label: const Text('Search'),
+              )),
+        ),
+        const SizedBox(width: 10),
         Expanded(
           child: Obx(() => OutlinedButton.icon(
                 onPressed: controller.isImporting.value ||
@@ -2101,24 +2113,18 @@ class ModelView extends GetView<ModelController> {
     );
   }
 
-  void _confirmDownload(BuildContext context, AiModel model,
-      {bool isToDownloadsFolder = false}) {
+  void _confirmDownload(BuildContext context, AiModel model) {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
         title: Row(
           children: [
-            Icon(
-              isToDownloadsFolder
-                  ? Icons.save_alt
-                  : Icons.cloud_download_outlined,
-              color: AppColors.primary,
-            ),
+            const Icon(Icons.cloud_download_outlined, color: AppColors.primary),
             const SizedBox(width: 10),
             Expanded(
               child: Text(
-                isToDownloadsFolder ? 'Save to Downloads' : 'Download Model',
+                'Download Model',
                 style: GoogleFonts.inter(fontWeight: FontWeight.w700),
               ),
             ),
@@ -2129,8 +2135,9 @@ class ModelView extends GetView<ModelController> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              isToDownloadsFolder
-                  ? 'You are about to save ${model.name} to your phone\'s public Downloads folder.'
+              model.needsMmproj
+                  ? 'You are about to download ${model.name} and its '
+                      'projector for use in the app.'
                   : 'You are about to download ${model.name} for use in the app.',
               style:
                   GoogleFonts.inter(fontSize: 15, fontWeight: FontWeight.w600),
@@ -2148,7 +2155,10 @@ class ModelView extends GetView<ModelController> {
                   const Icon(Icons.sd_storage_outlined, size: 16),
                   const SizedBox(width: 8),
                   Text(
-                    'Size: ${controller.modelSizeLabel(model)}',
+                    model.needsMmproj
+                        ? 'Weights: ${controller.modelSizeLabel(model)} '
+                            '+ projector'
+                        : 'Size: ${controller.modelSizeLabel(model)}',
                     style: GoogleFonts.inter(
                         fontSize: 13, fontWeight: FontWeight.w600),
                   ),
@@ -2197,19 +2207,15 @@ class ModelView extends GetView<ModelController> {
           FilledButton(
             onPressed: () {
               Navigator.of(ctx).pop();
-              if (isToDownloadsFolder) {
-                controller.downloadModelToDownloads(model);
-              } else {
-                controller.downloadModel(model);
-              }
+              controller.downloadModel(model);
             },
             style: FilledButton.styleFrom(
               shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12)),
               padding: const EdgeInsets.symmetric(horizontal: 20),
             ),
-            child: Text(isToDownloadsFolder ? 'Save Now' : 'Download Now',
-                style: const TextStyle(fontWeight: FontWeight.bold)),
+            child: const Text('Download Now',
+                style: TextStyle(fontWeight: FontWeight.bold)),
           ),
         ],
       ),
@@ -2446,8 +2452,14 @@ class ModelView extends GetView<ModelController> {
       final localImage = Get.find<LocalImageService>();
       final isActive = inference.loadedModelName.value == model.filename ||
           localImage.loadedModelName.value == model.filename;
+      // The projector is half of a multimodal download, and it keeps going
+      // after the weights land, so the card has to stay in the downloading
+      // state until both are in.
+      final isDownloadingWeights = controller.isDownloadingModel(model.filename);
+      final isDownloadingProjector = model.needsMmproj &&
+          controller.isDownloadingModel(model.mmprojFilename);
       final isCurrentlyDownloading =
-          controller.isDownloadingModel(model.filename);
+          isDownloadingWeights || isDownloadingProjector;
       final isAnyModelLoading =
           inference.isLoadingModel.value || localImage.isLoadingModel.value;
       final isThisTextModelLoading = inference.isLoadingModel.value &&
@@ -2622,16 +2634,6 @@ class ModelView extends GetView<ModelController> {
                                   style: TextStyle(
                                       fontWeight: FontWeight.bold)),
                             ),
-                            if (model.url.trim().isNotEmpty)
-                              IconButton(
-                                tooltip: 'Download to phone Downloads folder',
-                                onPressed: disableActions
-                                    ? null
-                                    : () => _confirmDownload(context, model,
-                                        isToDownloadsFolder: true),
-                                icon: const Icon(Icons.save_alt, size: 20),
-                                color: AppColors.secondary,
-                              ),
                           ],
                         ],
                       ),
@@ -2639,7 +2641,21 @@ class ModelView extends GetView<ModelController> {
                 ),
                 if (isCurrentlyDownloading) ...[
                   const SizedBox(height: 16),
-                  _buildInlineDownloadProgress(context, model),
+                  if (isDownloadingWeights)
+                    _buildInlineDownloadProgress(
+                      context,
+                      model.filename,
+                      label: model.needsMmproj ? 'Model weights' : null,
+                      totalFallback: controller.modelSizeLabel(model),
+                    ),
+                  if (isDownloadingProjector) ...[
+                    if (isDownloadingWeights) const SizedBox(height: 14),
+                    _buildInlineDownloadProgress(
+                      context,
+                      model.mmprojFilename,
+                      label: 'Projector',
+                    ),
+                  ],
                 ],
                 if (isThisModelLoading) ...[
                   const SizedBox(height: 16),
@@ -2653,13 +2669,20 @@ class ModelView extends GetView<ModelController> {
     });
   }
 
-  Widget _buildInlineDownloadProgress(BuildContext context, AiModel model) {
-    final dp = controller.getDownloadProgress(model.filename)!;
+  Widget _buildInlineDownloadProgress(
+    BuildContext context,
+    String filename, {
+    String? label,
+    String? totalFallback,
+  }) {
+    final dp = controller.getDownloadProgress(filename);
+    // The transfer can finish between the card rebuilding and this call.
+    if (dp == null) return const SizedBox.shrink();
     return Obx(() {
       final percent = dp.progress.value * 100;
       final totalLabel = dp.totalBytes.value > 0
           ? DownloadService.formatWholeMb(dp.totalBytes.value)
-          : controller.modelSizeLabel(model);
+          : (totalFallback ?? '--');
       final remaining = dp.totalBytes.value <= 0
           ? 0
           : (dp.totalBytes.value - dp.downloadedBytes.value)
@@ -2668,6 +2691,17 @@ class ModelView extends GetView<ModelController> {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          if (label != null) ...[
+            Text(
+              label,
+              style: GoogleFonts.inter(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                color: Theme.of(context).hintColor,
+              ),
+            ),
+            const SizedBox(height: 6),
+          ],
           ClipRRect(
             borderRadius: BorderRadius.circular(4),
             child: LinearProgressIndicator(
@@ -2707,7 +2741,7 @@ class ModelView extends GetView<ModelController> {
               ),
               const Spacer(),
               TextButton.icon(
-                onPressed: () => controller.pauseDownload(model.filename),
+                onPressed: () => controller.pauseDownload(filename),
                 icon: const Icon(Icons.close, size: 16),
                 label: const Text('Cancel'),
                 style: TextButton.styleFrom(foregroundColor: AppColors.error),

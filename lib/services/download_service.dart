@@ -215,6 +215,31 @@ class DownloadService extends GetxService with WidgetsBindingObserver {
     }
   }
 
+  /// Block until [filename] has finished downloading.
+  ///
+  /// On Android [downloadModel] hands the transfer to DownloadManager and
+  /// returns as soon as it is queued, so a caller that needs the bytes -- a
+  /// projector about to be handed to mtmd, say -- has to wait for them itself.
+  /// Returns false on timeout or when the download drops out of
+  /// [activeDownloads] without the file appearing (failed or cancelled).
+  Future<bool> awaitDownload(
+    String filename, {
+    Duration timeout = const Duration(minutes: 30),
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      if (await isModelDownloaded(filename)) return true;
+      if (!activeDownloads.containsKey(filename)) {
+        // Give the file a moment to land: the progress handler removes the
+        // entry before the last write is necessarily visible to us.
+        await Future.delayed(const Duration(milliseconds: 500));
+        return await isModelDownloaded(filename);
+      }
+      await Future.delayed(const Duration(milliseconds: 500));
+    }
+    return false;
+  }
+
   Future<String> downloadModel({
     required String url,
     required String filename,

@@ -638,9 +638,14 @@ class ChatView extends GetView<ChatController> {
                 final s = Get.find<SettingsController>();
                 final inf = Get.find<InferenceService>();
                 final isCloud = s.inferenceMode.value == 'cloud';
-                final isLocalVision = s.inferenceMode.value == 'local' &&
-                    inf.loadedModelRuntime.value == 'litert' &&
-                    inf.isVisionLoaded.value;
+                // Two runtimes can take attachments now: LiteRT carries its
+                // encoders inside the model file, while a GGUF model needs a
+                // projector that may or may not have loaded.
+                final isLocal = s.inferenceMode.value == 'local';
+                final isLocalVision = isLocal &&
+                    (inf.loadedModelRuntime.value == 'litert'
+                        ? inf.isVisionLoaded.value
+                        : inf.ggufVisionLoaded.value || inf.ggufAudioLoaded.value);
                 if (!isCloud && !isLocalVision) return const SizedBox.shrink();
                 return _AttachButton(
                   isDark: isDark,

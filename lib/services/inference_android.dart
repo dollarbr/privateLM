@@ -43,12 +43,24 @@ class InferenceEngine {
   double? _liteConversationTemperature;
   bool _liteConversationHasMessages = false;
 
+  /// What the loaded GGUF projector supports, or null when there is none.
+  MultimodalSupport? _mmprojSupport;
+  String _mediaMarker = '<__media__>';
+
+  MultimodalSupport? get multimodalSupport => _mmprojSupport;
+  String get mediaMarker => _mediaMarker;
+
   Future<LoadResult> loadModel({
     required String modelPath,
+    String? mmprojPath,
     String? modelRuntime,
     required int contextSize,
     required String deviceTier,
     bool isTensorSoC = false,
+    /// llama.cpp CPU threads, or 0 for half the cores.
+    int cpuThreads = 0,
+    /// Keep the vision encoder off the GPU even when the layers are on it.
+    bool mmprojForceCpu = false,
     String liteRtPerformanceMode = 'auto_fast',
     bool forceLiteRtCpu = false,
     bool clearLiteRtCache = false,
@@ -97,22 +109,19 @@ class InferenceEngine {
     }
 
     // ── Thread Tuning ──
-    int threads;
-    if (gpuLayers > 0) {
-      threads = deviceTier == 'ultra'
-          ? 4
-          : deviceTier == 'high'
-              ? 4
-              : 4;
-    } else {
-      threads = deviceTier == 'ultra'
-          ? 6
-          : deviceTier == 'high'
-              ? 5
-              : deviceTier == 'mid'
-                  ? 4
-                  : 3;
-    }
+    // Default is half the cores, not a number per tier. The tier string
+    // describes RAM, not the CPU, so the old table handed every GPU device 4
+    // threads and every 'high' device 5 whether the chip had 4 cores or 12.
+    //
+    // Half is not politeness towards the system: ggml syncs every thread at
+    // the end of each op, so on a big.LITTLE phone the little cores set the
+    // pace for the big ones and more threads can measure slower. The setting
+    // exists because that is worth testing per device, not assuming.
+    final cores = Platform.numberOfProcessors;
+    int threads = cpuThreads > 0 ? cpuThreads : (cores ~/ 2).clamp(2, 6);
+    threads = threads.clamp(1, cores < 1 ? 1 : cores);
+    print('[Inference] Threads: $threads of $cores cores'
+        '${cpuThreads > 0 ? ' (user set)' : ' (auto, half)'}');
 
     // Google Tensor SoC (Pixel 6/7/8) has known Q4_K_M dequant bugs
     // that corrupt logits at >1 thread on Gemma models. Force single-threaded
@@ -141,6 +150,37 @@ class InferenceEngine {
       gpuLayers: gpuLayers,
     );
     _hasLoadedModel = true;
+
+    // ── Multimodal projector ──
+    // A GGUF vision or audio model is two files: the weights, loaded above,
+    // and the projector that encodes the media. Offloading the encoder to the
+    // GPU follows the same decision as the model itself -- when there was not
+    // enough memory for a single layer there is none for a ViT either.
+    _mmprojSupport = null;
+    if (mmprojPath != null && mmprojPath.isNotEmpty) {
+      // Separately switchable from the model's own offload: a single 31 KB
+      // image measured 183 s to encode with useGpu on this Mali, one thread
+      // pegged and no system time -- the signature of a per-op Vulkan
+      // fallback shuttling tensors rather than a ViT running on the GPU.
+      // Which way is faster is a per-device fact, so it is a setting.
+      final useGpuForProjector = gpuLayers > 0 && !mmprojForceCpu;
+      print('[Inference] Projector backend: '
+          '${useGpuForProjector ? 'GPU' : 'CPU'} ($threads threads)');
+      final support = await LlamaMultimodal.loadProjector(
+        mmprojPath,
+        useGpu: useGpuForProjector,
+        nThreads: threads,
+      );
+      if (support == null) {
+        // Not fatal: the model still answers text. Saying so beats a silent
+        // downgrade the user only notices when an image is ignored.
+        print('[Inference] ⚠ Projector rejected: $mmprojPath');
+      } else {
+        _mmprojSupport = support;
+        _mediaMarker = await LlamaMultimodal.mediaMarker();
+        print('[Inference] ✓ Projector loaded: $support');
+      }
+    }
 
     final accel = gpuLayers > 0
         ? 'GPU ($gpuLayers layers, $gpuNameStr)'
@@ -361,12 +401,50 @@ class InferenceEngine {
     }
 
     if (_controller == null) throw Exception('No model loaded');
-    if (imagePath != null && imagePath.isNotEmpty) {
-      return 'GGUF image input is not available in this build yet. This llama runtime is text-only right now: it does not load a matching mmproj vision projector or send image pixels into llama.cpp. Use a LiteRT vision model for image understanding.';
+
+    // ── Attachments (libmtmd) ──
+    // The projector decides what this model can actually read: refusing an
+    // image because no projector is loaded is a different answer from
+    // refusing it because the projector only does audio.
+    final support = _mmprojSupport;
+    final hasImage = imagePath != null && imagePath.isNotEmpty;
+    final hasAudio = audioPath != null && audioPath.isNotEmpty;
+
+    if (hasImage && support?.vision != true) {
+      return support == null
+          ? 'This model has no multimodal projector loaded, so it cannot see '
+              'images. Pick a model that ships an mmproj file, or use a LiteRT '
+              'multimodal model.'
+          : 'This projector handles audio only — it cannot read images.';
     }
-    if (audioPath != null && audioPath.isNotEmpty) {
-      return 'GGUF audio input is not available in this build yet. Text files can be read when their content is attached, but audio needs a model/runtime path that supports audio input.';
+    if (hasAudio && support?.audio != true) {
+      return support == null
+          ? 'This model has no multimodal projector loaded, so it cannot hear '
+              'audio. Pick a model that ships an mmproj file, or use a LiteRT '
+              'multimodal model.'
+          : 'This projector handles images only — it cannot read audio.';
     }
+
+    var userPrompt = prompt;
+    if (hasImage || hasAudio) {
+      // Order matters: the markers are matched to the queued files positionally.
+      final media = <String>[
+        if (hasImage) imagePath,
+        if (hasAudio) audioPath,
+      ];
+      await LlamaMultimodal.setMedia(media);
+      userPrompt = '${List.filled(media.length, _mediaMarker).join('\n')}\n$prompt';
+      print('[Inference] Queued ${media.length} attachment(s) for mtmd');
+    }
+
+    // The encoder runs before a single token exists, and it is slow enough to
+    // dwarf a text prefill: one image measured 84s on CPU and 197s on this
+    // Mali's Vulkan fallback. A flat 60s budget declared those runs dead while
+    // they were still working, and the answer then arrived after the app had
+    // already given up on it.
+    final mediaCount = (hasImage ? 1 : 0) + (hasAudio ? 1 : 0);
+    final prefillBudget = Duration(seconds: 60 + 240 * mediaCount);
+    final hardBudget = Duration(seconds: 180 + 240 * mediaCount);
 
     final completer = Completer<String>();
     final buffer = StringBuffer();
@@ -378,6 +456,11 @@ class InferenceEngine {
         _idleTimer?.cancel();
         _subscription?.cancel();
         _onStop = null;
+        // Cancelling the Dart subscription does not stop nativeGenerate: it
+        // keeps decoding on its worker thread, holding the context. Timing
+        // out here without saying so left it running, and the next prompt
+        // then queued behind it for the rest of the abandoned generation.
+        unawaited(_controller?.stop() ?? Future.value());
         if (!completer.isCompleted) completer.complete(result);
       }
     }
@@ -390,8 +473,8 @@ class InferenceEngine {
     Stream<String>? stream;
     try {
       final messages = _buildChatMessages(
-          prompt, conversationHistory, systemPrompt,
-          imagePath: imagePath);
+          userPrompt, conversationHistory, systemPrompt,
+          imagePath: imagePath, historyPrompt: prompt);
       stream = _controller!.generateChat(
         messages: messages,
         template: null,
@@ -410,8 +493,8 @@ class InferenceEngine {
         await _controller!.stop();
       } catch (_) {}
       await Future.delayed(const Duration(milliseconds: 100));
-      final fullPrompt =
-          _buildPrompt(prompt, conversationHistory, systemPrompt, modelName);
+      final fullPrompt = _buildPrompt(
+          userPrompt, conversationHistory, systemPrompt, modelName);
       stream = _controller!.generate(
         prompt: fullPrompt,
         maxTokens: maxTokens,
@@ -452,15 +535,18 @@ class InferenceEngine {
     );
 
     // Prefill timeout
-    _idleTimer = Timer(const Duration(seconds: 60), () {
+    _idleTimer = Timer(prefillBudget, () {
       if (tokenCount == 0) {
-        finish(
-            'ERROR: Model did not respond. Try a smaller model or shorter conversation.');
+        finish(mediaCount > 0
+            ? 'ERROR: The encoder did not finish within '
+                '${prefillBudget.inSeconds}s. Try a smaller image, or switch '
+                'the vision encoder backend in Settings.'
+            : 'ERROR: Model did not respond. Try a smaller model or shorter conversation.');
       }
     });
 
     // Hard timeout
-    Future.delayed(const Duration(seconds: 180), () {
+    Future.delayed(hardBudget, () {
       if (!completed) {
         final partial = buffer.toString();
         finish(partial.isEmpty ? 'ERROR: Generation timed out.' : partial);
@@ -815,6 +901,11 @@ class InferenceEngine {
     List<Map<String, String>>? history,
     String systemPrompt, {
     String? imagePath,
+    // What the caller's message looks like in the history. With attachments
+    // [prompt] carries media markers the history entry does not have, and
+    // comparing the decorated text would miss the match and send the turn
+    // twice.
+    String? historyPrompt,
   }) {
     final messages = <ChatMessage>[];
     messages.add(ChatMessage(role: 'system', content: systemPrompt));
@@ -825,7 +916,7 @@ class InferenceEngine {
           : List.of(history);
       if (recent.isNotEmpty &&
           recent.last['role'] == 'user' &&
-          recent.last['content'] == prompt) {
+          recent.last['content'] == (historyPrompt ?? prompt)) {
         recent = recent.sublist(0, recent.length - 1);
       }
       for (final msg in recent) {

@@ -21,6 +21,11 @@ class InferenceService extends GetxService {
   final isGenerating = false.obs;
   final isLoadingModel = false.obs;
   final isVisionLoaded = false.obs;
+
+  /// Set once a GGUF projector is loaded, so the UI can offer attachments for
+  /// llama models too rather than assuming multimodal means LiteRT.
+  final ggufVisionLoaded = false.obs;
+  final ggufAudioLoaded = false.obs;
   final loadingModelName = ''.obs;
   final loadedModelName = ''.obs;
   final tokenCount = 0.obs;
@@ -57,6 +62,7 @@ class InferenceService extends GetxService {
     String? modelName,
     String? modelRuntime,
     bool enableLiteRtVision = false,
+    String? mmprojPath,
   }) async {
     if (!supportsLocalInference) {
       return 'ERROR: Local inference is not available on this platform. Use Cloud mode.';
@@ -128,6 +134,12 @@ class InferenceService extends GetxService {
         contextSize: finalContextSize,
         deviceTier: deviceTier,
         isTensorSoC: isTensorSoC,
+        cpuThreads: _hive.getSetting<int>(AppConstants.keyCpuThreads,
+                defaultValue: AppConstants.defaultCpuThreads) ??
+            AppConstants.defaultCpuThreads,
+        mmprojForceCpu: _hive.getSetting<bool>(AppConstants.keyMmprojForceCpu,
+                defaultValue: AppConstants.defaultMmprojForceCpu) ??
+            AppConstants.defaultMmprojForceCpu,
         liteRtPerformanceMode: liteRtMode,
         forceLiteRtCpu: forceLiteRtCpu,
         clearLiteRtCache: hadPendingGpuLoad ||
@@ -135,6 +147,7 @@ class InferenceService extends GetxService {
             contextChanged,
         markLiteRtGpuPending: shouldTryLiteRtGpu,
         enableLiteRtVision: enableLiteRtVision,
+        mmprojPath: mmprojPath,
       );
 
       if (!result.success &&
@@ -186,6 +199,12 @@ class InferenceService extends GetxService {
         _sessionNativeRuntime = result.runtime;
       }
       loadedBackend.value = result.backend;
+
+      // What the projector reported, not what the catalogue promised: a file
+      // that failed to load must not leave the attach button enabled.
+      final mmproj = _engine?.multimodalSupport;
+      ggufVisionLoaded.value = mmproj?.vision ?? false;
+      ggufAudioLoaded.value = mmproj?.audio ?? false;
       gpuName.value = result.gpuName;
       gpuLayersUsed.value = result.gpuLayers;
       isGpuAccelerated.value = result.backend == 'gpu' || result.gpuLayers > 0;
@@ -194,6 +213,20 @@ class InferenceService extends GetxService {
       }
       contextTokensUsed.value = 0;
       contextTokensTotal.value = finalContextSize;
+
+      // The Logs screen only ever held failures, which made it useless for the
+      // question people actually ask it: which backend did this load land on.
+      Get.find<AppLogService>().info(
+        'Loaded $activeModelName on ${result.backend.toUpperCase()}',
+        details: [
+          'runtime=${result.runtime}',
+          if (result.gpuName.isNotEmpty) 'gpu=${result.gpuName}',
+          'gpuLayers=${result.gpuLayers}',
+          'context=$finalContextSize',
+          'vision=${ggufVisionLoaded.value}',
+          'audio=${ggufAudioLoaded.value}',
+        ].join(', '),
+      );
 
       await _hive.setSetting(AppConstants.keyLocalModelPath, modelPath);
       await _hive.setSetting(
@@ -228,6 +261,8 @@ class InferenceService extends GetxService {
     }
     isModelLoaded.value = false;
     isVisionLoaded.value = false;
+    ggufVisionLoaded.value = false;
+    ggufAudioLoaded.value = false;
     loadedModelName.value = '';
     loadingModelName.value = '';
     loadedModelRuntime.value = '';
@@ -424,6 +459,9 @@ class InferenceService extends GetxService {
     required bool clearLiteRtCache,
     required bool markLiteRtGpuPending,
     required bool enableLiteRtVision,
+    required int cpuThreads,
+    required bool mmprojForceCpu,
+    String? mmprojPath,
   }) async {
     var gpuLoadFailed = false;
     try {
@@ -436,10 +474,13 @@ class InferenceService extends GetxService {
         contextSize: contextSize,
         deviceTier: deviceTier,
         isTensorSoC: isTensorSoC,
+        cpuThreads: cpuThreads,
+        mmprojForceCpu: mmprojForceCpu,
         liteRtPerformanceMode: liteRtPerformanceMode,
         forceLiteRtCpu: forceLiteRtCpu,
         clearLiteRtCache: clearLiteRtCache,
         enableLiteRtVision: enableLiteRtVision,
+        mmprojPath: mmprojPath,
         onProgress: (p) => modelLoadProgress.value = _normalizeProgress(p),
       );
       if (result.success ||
@@ -461,6 +502,7 @@ class InferenceService extends GetxService {
         forceLiteRtCpu: true,
         clearLiteRtCache: true,
         enableLiteRtVision: enableLiteRtVision,
+        mmprojPath: mmprojPath,
         onProgress: (p) => modelLoadProgress.value = _normalizeProgress(p),
       );
     } catch (e) {
@@ -479,6 +521,7 @@ class InferenceService extends GetxService {
             forceLiteRtCpu: true,
             clearLiteRtCache: true,
             enableLiteRtVision: enableLiteRtVision,
+            mmprojPath: mmprojPath,
             onProgress: (p) => modelLoadProgress.value = _normalizeProgress(p),
           );
         } catch (cpuError) {
