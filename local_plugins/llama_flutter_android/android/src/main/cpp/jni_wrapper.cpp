@@ -4,26 +4,103 @@
 #include <atomic>
 #include <ctime>
 #include <cstring>
+#include <cstdarg>
 #include <fstream>
 #include <mutex>
+#include <deque>
 #include <android/log.h>
 #include "llama.cpp/include/llama.h"
+#include "mtmd.h"
+#include "mtmd-helper.h"
 #define LOG_TAG "LlamaJNI"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 static llama_model* g_model = nullptr;
 static llama_context* g_ctx = nullptr;
 static const llama_vocab* g_vocab = nullptr;
 static llama_sampler* g_sampler = nullptr;
 static std::atomic<bool> g_stop_flag{false};
+// Serialises generation against teardown.
+//
+// nativeGenerate blocks inside llama_decode for as long as a prefill takes,
+// and the Kotlin side frees the model from the main thread when the Flutter
+// engine detaches. Coroutine cancellation cannot interrupt a JNI call that is
+// already running, so without this the free ran underneath a live decode:
+// "Scudo ERROR: invalid chunk state when deallocating" in llama_free.
+static std::mutex g_ctx_mutex;
 static int g_n_past = 0;  // Track the number of tokens already in KV cache
 static std::mutex g_load_log_mutex;
 static std::string g_load_error;
 static bool g_capture_load_error = false;
 
+// Multimodal state. g_mtmd holds the projector (the mmproj GGUF); it is a
+// separate model from g_model and is loaded on its own.
+static mtmd_context* g_mtmd = nullptr;
+
+// Media queued by nativeSetMedia and consumed by the next nativeGenerate.
+// Passing the paths through a global rather than widening nativeGenerate's
+// already 18-argument signature -- the generation entry point is stateful
+// anyway (g_model, g_ctx, g_n_past), so this follows the file's own grain.
+static std::vector<std::string> g_pending_media;
+
+// Everything ggml and llama.cpp print, kept for the Dart side to drain.
+//
+// The in-app log only ever saw Dart `print()`, so the layer that actually
+// explains a bad load -- backend selection, layer offload, buffer allocation,
+// Vulkan errors -- was invisible without a cable. This ring makes it
+// reachable. It is polled rather than pushed because androidLlamaLog runs on
+// llama.cpp worker threads, and attaching those to the JVM to call back into
+// Dart mid-inference is a far worse trade than a 1s poll.
+static std::mutex g_log_ring_mutex;
+static std::deque<std::string> g_log_ring;
+static constexpr size_t kLogRingMax = 600;
+
+static void pushLogRing(ggml_log_level level, const char* text) {
+    const char* tag = level >= GGML_LOG_LEVEL_ERROR
+        ? "ERROR"
+        : level == GGML_LOG_LEVEL_WARN ? "WARNING" : "INFO";
+    std::string line;
+    line.reserve(16 + strlen(text));
+    // GGML_LOG_LEVEL_CONT continues the previous line, so glue it on instead
+    // of emitting a fragment with its own level tag.
+    std::lock_guard<std::mutex> lock(g_log_ring_mutex);
+    if (level == GGML_LOG_LEVEL_CONT && !g_log_ring.empty()) {
+        g_log_ring.back().append(text);
+    } else {
+        line.append(tag).append("\t").append(text);
+        g_log_ring.push_back(std::move(line));
+    }
+    std::string& last = g_log_ring.back();
+    while (!last.empty() && (last.back() == '\n' || last.back() == '\r')) {
+        last.pop_back();
+    }
+    // A bare newline leaves nothing but the tag and its separator: drop it
+    // rather than pad the log with blank lines.
+    const size_t tab = last.find('\t');
+    if (tab == std::string::npos || tab + 1 >= last.size()) {
+        g_log_ring.pop_back();
+    }
+    while (g_log_ring.size() > kLogRingMax) g_log_ring.pop_front();
+}
+
+// This wrapper's own messages -- GPU detection, model and projector paths,
+// load outcome -- used to exist only in logcat, which is exactly the set the
+// in-app log most needs. Route them through the ring as well.
+static void logRingf(ggml_log_level level, int priority, const char* fmt, ...) {
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    __android_log_write(priority, LOG_TAG, buf);
+    pushLogRing(level, buf);
+}
+
+#define LOGI(...) logRingf(GGML_LOG_LEVEL_INFO, ANDROID_LOG_INFO, __VA_ARGS__)
+#define LOGE(...) logRingf(GGML_LOG_LEVEL_ERROR, ANDROID_LOG_ERROR, __VA_ARGS__)
+
 static void androidLlamaLog(ggml_log_level level, const char* text, void*) {
     if (!text) return;
+    pushLogRing(level, text);
 
     const int priority = level >= GGML_LOG_LEVEL_ERROR
         ? ANDROID_LOG_ERROR
@@ -191,6 +268,16 @@ static std::string sanitizeUTF8(const char* str, size_t len) {
     return result;
 }
 
+// Installed here rather than in nativeLoadModel so that everything ggml says
+// before the first load -- backend registration, device enumeration, the
+// Vulkan probe in nativeDetectGpu -- reaches the ring too. Those lines are
+// what explain a bad accelerator choice, and they were being lost.
+extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
+    llama_log_set(androidLlamaLog, nullptr);
+    (void)vm;
+    return JNI_VERSION_1_6;
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_write4me_llama_1flutter_1android_LlamaFlutterAndroidPlugin_nativeDetectGpu(
         JNIEnv* env, jobject /* this */, jlongArray outStats) {
@@ -199,10 +286,50 @@ Java_com_write4me_llama_1flutter_1android_LlamaFlutterAndroidPlugin_nativeDetect
     jlong defaults[2] = {-1L, -1L};
     env->SetLongArrayRegion(outStats, 0, 2, defaults);
 
-    // Vulkan GPU detection is disabled on Android to avoid driver crashes
-    // on older devices (e.g., Adreno 630). llama.cpp inference already runs
-    // on CPU (GGML_VULKAN=OFF), so GPU layers are not used anyway.
-    LOGI("nativeDetectGpu: skipped — CPU-only mode on Android");
+    // Ask ggml what it actually registered rather than opening a Vulkan
+    // instance of our own: the backend that will run the layers is the only
+    // authority on whether the offload is possible, and a device ggml did not
+    // register is one llama_model_load could not use even if Vulkan answered.
+    // Backends may be dynamically loaded shared objects rather than statically
+    // registered; without this the registry can be empty on the first call and
+    // only fills in later, when llama_model_load does it for us.
+    ggml_backend_load_all();
+
+    const size_t n_devices = ggml_backend_dev_count();
+    LOGI("nativeDetectGpu: %zu device(s) registered", n_devices);
+    for (size_t i = 0; i < n_devices; i++) {
+        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+        if (!dev) {
+            continue;
+        }
+        const enum ggml_backend_dev_type type = ggml_backend_dev_type(dev);
+        LOGI("nativeDetectGpu:   device %zu: %s (type %d)", i,
+             ggml_backend_dev_name(dev), (int)type);
+        // IGPU is not a lesser GPU, it is the only kind a phone has: ggml sorts
+        // the Mali here because it shares system memory rather than owning a
+        // heap. Accepting only _GPU rejects every Android device there is.
+        if (type != GGML_BACKEND_DEVICE_TYPE_GPU &&
+            type != GGML_BACKEND_DEVICE_TYPE_IGPU) {
+            continue;
+        }
+
+        size_t free_mem = 0;
+        size_t total_mem = 0;
+        ggml_backend_dev_memory(dev, &free_mem, &total_mem);
+
+        // outStats[0] stays -1: ggml does not expose the Vulkan API version and
+        // nothing downstream reads it. outStats[1] is what sizes the offload --
+        // on a UMA phone that is system memory, not a private heap.
+        jlong stats[2] = {-1L, (jlong)total_mem};
+        env->SetLongArrayRegion(outStats, 0, 2, stats);
+
+        const char* name = ggml_backend_dev_description(dev);
+        LOGI("nativeDetectGpu: %s, %zu MiB total", name ? name : "GPU",
+             total_mem / (1024 * 1024));
+        return env->NewStringUTF(name ? name : "GPU");
+    }
+
+    LOGI("nativeDetectGpu: no GPU backend registered");
     return nullptr;
 }
 
@@ -245,6 +372,12 @@ Java_com_write4me_llama_1flutter_1android_LlamaFlutterAndroidPlugin_nativeLoadMo
         return;
     }
     model_file.close();
+
+    // Same hazard as teardown: replacing g_model/g_ctx while a generation
+    // still holds them is a use-after-free.
+    g_stop_flag = true;
+    std::lock_guard<std::mutex> ctx_lock(g_ctx_mutex);
+    g_stop_flag = false;
 
     // Model parameters
     llama_model_params model_params = llama_model_default_params();
@@ -357,6 +490,130 @@ Java_com_write4me_llama_1flutter_1android_LlamaFlutterAndroidPlugin_nativeLoadMo
 
 static jobject g_token_callback = nullptr;
 
+// ---------------------------------------------------------------------------
+// Multimodal (libmtmd)
+// ---------------------------------------------------------------------------
+
+// The marker the projector expects in the prompt where media should be spliced
+// in. Exposed so the Dart side can place it inside the chat template rather
+// than having the JNI guess where the user's turn begins.
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_write4me_llama_1flutter_1android_LlamaFlutterAndroidPlugin_nativeDrainLog(
+        JNIEnv* env, jobject /* this */) {
+    std::deque<std::string> drained;
+    {
+        std::lock_guard<std::mutex> lock(g_log_ring_mutex);
+        drained.swap(g_log_ring);
+    }
+    jclass stringClass = env->FindClass("java/lang/String");
+    jobjectArray out = env->NewObjectArray(
+        static_cast<jsize>(drained.size()), stringClass, nullptr);
+    for (jsize i = 0; i < static_cast<jsize>(drained.size()); ++i) {
+        jstring line = env->NewStringUTF(drained[i].c_str());
+        // NewStringUTF returns null on malformed UTF-8; skip rather than
+        // hand the JVM a null element the Kotlin side would trip over.
+        if (line == nullptr) {
+            env->ExceptionClear();
+            continue;
+        }
+        env->SetObjectArrayElement(out, i, line);
+        env->DeleteLocalRef(line);
+    }
+    return out;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_write4me_llama_1flutter_1android_LlamaFlutterAndroidPlugin_nativeMediaMarker(
+    JNIEnv* env, jobject thiz) {
+    return env->NewStringUTF(mtmd_default_marker());
+}
+
+// Loads the multimodal projector that pairs with the already-loaded model.
+// Returns a capability bitmask: 1 = vision, 2 = audio, -1 = load failed.
+extern "C" JNIEXPORT jint JNICALL
+Java_com_write4me_llama_1flutter_1android_LlamaFlutterAndroidPlugin_nativeLoadMmproj(
+    JNIEnv* env, jobject thiz, jstring mmproj_path, jboolean use_gpu, jint n_threads) {
+
+    if (!g_model) {
+        LOGE("Cannot load mmproj: no model loaded");
+        return -1;
+    }
+
+    if (g_mtmd) {
+        mtmd_free(g_mtmd);
+        g_mtmd = nullptr;
+    }
+
+    const char* path = env->GetStringUTFChars(mmproj_path, nullptr);
+    LOGI("Loading mmproj: %s (gpu=%d)", path, (int)use_gpu);
+
+    mtmd_context_params params = mtmd_context_params_default();
+    params.use_gpu       = use_gpu;
+    // On by default: the encoder is the slowest step of a multimodal turn by
+    // an order of magnitude, and without its own timing there is no way to tell
+    // an expensive image apart from a slow prefill in the log.
+    params.print_timings = true;
+    params.n_threads     = n_threads > 0 ? n_threads : 4;
+    // The encoder runs once per image, and a warmup pass would double the cost
+    // of the very first one for no benefit on a phone.
+    params.warmup        = false;
+
+    g_mtmd = mtmd_init_from_file(path, g_model, params);
+    env->ReleaseStringUTFChars(mmproj_path, path);
+
+    if (!g_mtmd) {
+        LOGE("mtmd_init_from_file failed");
+        return -1;
+    }
+
+    jint caps = 0;
+    if (mtmd_support_vision(g_mtmd)) caps |= 1;
+    if (mtmd_support_audio(g_mtmd))  caps |= 2;
+    LOGI("mmproj loaded, capabilities: vision=%d audio=%d",
+         (caps & 1) ? 1 : 0, (caps & 2) ? 1 : 0);
+    return caps;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_write4me_llama_1flutter_1android_LlamaFlutterAndroidPlugin_nativeFreeMmproj(
+    JNIEnv* env, jobject thiz) {
+    if (g_mtmd) {
+        mtmd_free(g_mtmd);
+        g_mtmd = nullptr;
+        LOGI("mmproj freed");
+    }
+    g_pending_media.clear();
+}
+
+// Audio input has to be resampled to whatever rate the projector was trained
+// on. Reported here so the caller can convert before handing over a file.
+extern "C" JNIEXPORT jint JNICALL
+Java_com_write4me_llama_1flutter_1android_LlamaFlutterAndroidPlugin_nativeAudioSampleRate(
+    JNIEnv* env, jobject thiz) {
+    return g_mtmd ? mtmd_get_audio_sample_rate(g_mtmd) : 0;
+}
+
+// Queues media for the next generate call. Each path is an image or audio file
+// and must line up, in order, with the markers in that call's prompt.
+extern "C" JNIEXPORT void JNICALL
+Java_com_write4me_llama_1flutter_1android_LlamaFlutterAndroidPlugin_nativeSetMedia(
+    JNIEnv* env, jobject thiz, jobjectArray paths) {
+
+    g_pending_media.clear();
+    if (paths == nullptr) return;
+
+    const jsize count = env->GetArrayLength(paths);
+    for (jsize i = 0; i < count; i++) {
+        jstring item = (jstring) env->GetObjectArrayElement(paths, i);
+        if (item == nullptr) continue;
+        const char* chars = env->GetStringUTFChars(item, nullptr);
+        g_pending_media.emplace_back(chars);
+        env->ReleaseStringUTFChars(item, chars);
+        env->DeleteLocalRef(item);
+    }
+    LOGI("Queued %zu media file(s) for the next generation", g_pending_media.size());
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_write4me_llama_1flutter_1android_LlamaFlutterAndroidPlugin_nativeGenerate(
     JNIEnv* env, jobject thiz,
@@ -379,6 +636,19 @@ Java_com_write4me_llama_1flutter_1android_LlamaFlutterAndroidPlugin_nativeGenera
         return;
     }
 
+    // Held for the whole generation: nothing may free g_ctx underneath it.
+    //
+    // Logged around, not just taken: the lock is acquired before any other
+    // message, so a request blocked here would otherwise look exactly like
+    // one that was never made. Those need different fixes, so say which.
+    LOGI("nativeGenerate: entry");
+    std::unique_lock<std::mutex> ctx_lock(g_ctx_mutex, std::try_to_lock);
+    if (!ctx_lock.owns_lock()) {
+        LOGI("nativeGenerate: context busy, waiting for the previous generation");
+        ctx_lock.lock();
+    }
+    LOGI("nativeGenerate: context acquired");
+
     // Clear memory from previous generation to start fresh
     const char* prompt_str = env->GetStringUTFChars(prompt, nullptr);
     g_stop_flag = false;
@@ -389,88 +659,194 @@ Java_com_write4me_llama_1flutter_1android_LlamaFlutterAndroidPlugin_nativeGenera
 
     // Sanitize the UTF-8 string before tokenizing
     std::string sanitized_prompt = sanitizeUTF8(prompt_str, prompt_len);
-    const char* sanitized_cstr = sanitized_prompt.c_str();
-    const int sanitized_len = sanitized_prompt.length();
-    
-    // Tokenize prompt - when tokens is NULL, llama_tokenize returns NEGATIVE count
-    const int n_prompt_tokens = -llama_tokenize(g_vocab, sanitized_cstr, sanitized_len, nullptr, 0, true, true);
-    LOGI("Token count: %d", n_prompt_tokens);
-    
-    if (n_prompt_tokens <= 0) {
-        env->ReleaseStringUTFChars(prompt, prompt_str);
-        jclass exception = env->FindClass("java/lang/RuntimeException");
-        char error_msg[256];
-        snprintf(error_msg, sizeof(error_msg), "Failed to tokenize prompt (got %d tokens)", n_prompt_tokens);
-        env->ThrowNew(exception, error_msg);
-        return;
-    }
-    std::vector<llama_token> tokens(n_prompt_tokens);
-    const int actual_tokens = llama_tokenize(g_vocab, sanitized_cstr, sanitized_len, tokens.data(), tokens.size(), true, true);
-    if (actual_tokens < 0) {
-        env->ReleaseStringUTFChars(prompt, prompt_str);
-        jclass exception = env->FindClass("java/lang/RuntimeException");
-        env->ThrowNew(exception, "Failed to tokenize prompt");
-        return;
-    }
-    tokens.resize(actual_tokens);
     env->ReleaseStringUTFChars(prompt, prompt_str);
 
     const int n_ctx = llama_n_ctx(g_ctx);
-
-    // Check if the context will be exceeded and apply a sliding window for the KV cache
-    if (g_n_past + (int)tokens.size() > n_ctx) {
-        const int n_discard = n_ctx / 4; // Discard the oldest 25% of the context
-        LOGI("Context is full, shifting KV cache by %d tokens", n_discard);
-
-        // Remove the oldest tokens from the sequence
-        llama_memory_seq_rm(llama_get_memory(g_ctx), 0, 0, n_discard);
-        
-        // Shift the remaining tokens
-        llama_memory_seq_add(llama_get_memory(g_ctx), 0, n_discard, g_n_past, -n_discard);
-
-        // Update the past tokens count
-        g_n_past -= n_discard;
-    }
-
-    // Process prompt in batches to handle long inputs
     const int max_batch_size = 512;
-    int tokens_processed = 0;
-    
+
+    // Reused by both prefill paths below and by the generation loop.
     llama_batch batch = llama_batch_init(max_batch_size, 0, 1);
+    LOGI("Context size: %d", n_ctx);
 
-    LOGI("Context size: %d", llama_n_ctx(g_ctx));
+    // Shifts the KV cache when the incoming prompt would not fit, dropping the
+    // oldest quarter of the context.
+    auto make_room_for = [&](int incoming) {
+        if (g_n_past + incoming <= n_ctx) return;
+        const int n_discard = n_ctx / 4;
+        LOGI("Context is full, shifting KV cache by %d tokens", n_discard);
+        llama_memory_seq_rm (llama_get_memory(g_ctx), 0, 0, n_discard);
+        llama_memory_seq_add(llama_get_memory(g_ctx), 0, n_discard, g_n_past, -n_discard);
+        g_n_past -= n_discard;
+    };
 
-    while (tokens_processed < tokens.size()) {
-        batch.n_tokens = 0;
-        int batch_size = std::min((int)tokens.size() - tokens_processed, max_batch_size);
+    const bool use_mtmd = (g_mtmd != nullptr) && !g_pending_media.empty();
 
-        for (int i = 0; i < batch_size; i++) {
-            batch.token[batch.n_tokens] = tokens[tokens_processed + i];
-            batch.pos[batch.n_tokens] = g_n_past + tokens_processed + i;
-            batch.n_seq_id[batch.n_tokens] = 1;
-            batch.seq_id[batch.n_tokens][0] = 0;
-            batch.logits[batch.n_tokens] = (tokens_processed + i == tokens.size() - 1);
-            batch.n_tokens++;
+    if (use_mtmd) {
+        // --- multimodal prefill ------------------------------------------
+        // libmtmd splits the prompt at each media marker, runs the vision or
+        // audio encoder over the matching file, and feeds the resulting
+        // embeddings to llama_decode itself. Tokenizing here by hand would
+        // throw the media away, which is why this path bypasses the block
+        // below entirely.
+        const std::string marker = mtmd_default_marker();
+
+        size_t marker_count = 0;
+        for (size_t at = sanitized_prompt.find(marker); at != std::string::npos;
+             at = sanitized_prompt.find(marker, at + marker.size())) {
+            marker_count++;
         }
 
-        LOGI("Decoding batch starting at position %d with %d tokens", g_n_past + tokens_processed, batch.n_tokens);
+        // mtmd_tokenize fails outright when the counts disagree. Rather than
+        // error out, normalize: strip whatever markers are there and put one
+        // per file at the front. A misplaced marker degrades the answer; a
+        // missing one loses the image.
+        if (marker_count != g_pending_media.size()) {
+            LOGI("Marker count %zu != %zu media file(s), rewriting prompt",
+                 marker_count, g_pending_media.size());
+            for (size_t at = sanitized_prompt.find(marker); at != std::string::npos;
+                 at = sanitized_prompt.find(marker)) {
+                sanitized_prompt.erase(at, marker.size());
+            }
+            std::string prefix;
+            for (size_t i = 0; i < g_pending_media.size(); i++) {
+                prefix += marker;
+                prefix += "\n";
+            }
+            sanitized_prompt = prefix + sanitized_prompt;
+        }
 
-        LOGI("Decoding batch: g_n_past=%d, batch_size=%d", g_n_past + tokens_processed, batch.n_tokens);
-        int decode_result = llama_decode(g_ctx, batch);
-        if (decode_result != 0) {
-            LOGE("❌ DECODE FAILED! Result code: %d", decode_result);
+        std::vector<mtmd_bitmap*> bitmaps;
+        std::string load_failure;
+        for (const std::string& path : g_pending_media) {
+            mtmd_bitmap* bitmap = mtmd_helper_bitmap_init_from_file(g_mtmd, path.c_str());
+            if (!bitmap) {
+                load_failure = path;
+                break;
+            }
+            bitmaps.push_back(bitmap);
+        }
+
+        if (!load_failure.empty()) {
+            for (mtmd_bitmap* b : bitmaps) mtmd_bitmap_free(b);
+            g_pending_media.clear();
             llama_batch_free(batch);
+            LOGE("Failed to load media file: %s", load_failure.c_str());
             jclass exception = env->FindClass("java/lang/RuntimeException");
-            env->ThrowNew(exception, "Failed to decode prompt");
+            env->ThrowNew(exception,
+                ("Failed to read media file: " + load_failure).c_str());
             return;
         }
-        tokens_processed += batch_size;
+
+        mtmd_input_text text;
+        text.text          = sanitized_prompt.c_str();
+        text.add_special   = true;
+        text.parse_special = true;
+
+        std::vector<const mtmd_bitmap*> bitmap_ptrs(bitmaps.begin(), bitmaps.end());
+        mtmd_input_chunks* chunks = mtmd_input_chunks_init();
+
+        const int32_t tokenize_rc = mtmd_tokenize(
+            g_mtmd, chunks, &text, bitmap_ptrs.data(), bitmap_ptrs.size());
+
+        for (mtmd_bitmap* b : bitmaps) mtmd_bitmap_free(b);
+        g_pending_media.clear();
+
+        if (tokenize_rc != 0) {
+            mtmd_input_chunks_free(chunks);
+            llama_batch_free(batch);
+            LOGE("mtmd_tokenize failed with code %d", tokenize_rc);
+            jclass exception = env->FindClass("java/lang/RuntimeException");
+            env->ThrowNew(exception, tokenize_rc == 1
+                ? "Media count does not match the markers in the prompt"
+                : "Failed to preprocess the media for this model");
+            return;
+        }
+
+        const size_t n_incoming = mtmd_helper_get_n_tokens(chunks);
+        LOGI("Multimodal prompt: %zu tokens across %zu chunk(s)",
+             n_incoming, mtmd_input_chunks_size(chunks));
+        make_room_for((int) n_incoming);
+
+        llama_pos new_n_past = g_n_past;
+        const int32_t eval_rc = mtmd_helper_eval_chunks(
+            g_mtmd, g_ctx, chunks, g_n_past, /* seq_id */ 0,
+            max_batch_size, /* logits_last */ true, &new_n_past);
+
+        mtmd_input_chunks_free(chunks);
+
+        if (eval_rc != 0) {
+            llama_batch_free(batch);
+            LOGE("mtmd_helper_eval_chunks failed with code %d", eval_rc);
+            jclass exception = env->FindClass("java/lang/RuntimeException");
+            env->ThrowNew(exception, "Failed to evaluate the multimodal prompt");
+            return;
+        }
+
+        g_n_past = new_n_past;
+        LOGI("Multimodal prefill done, g_n_past=%d", g_n_past);
+
+    } else {
+        // --- text-only prefill -------------------------------------------
+        const char* sanitized_cstr = sanitized_prompt.c_str();
+        const int sanitized_len = sanitized_prompt.length();
+
+        // Tokenize prompt - when tokens is NULL, llama_tokenize returns NEGATIVE count
+        const int n_prompt_tokens = -llama_tokenize(g_vocab, sanitized_cstr, sanitized_len, nullptr, 0, true, true);
+        LOGI("Token count: %d", n_prompt_tokens);
+
+        if (n_prompt_tokens <= 0) {
+            llama_batch_free(batch);
+            jclass exception = env->FindClass("java/lang/RuntimeException");
+            char error_msg[256];
+            snprintf(error_msg, sizeof(error_msg), "Failed to tokenize prompt (got %d tokens)", n_prompt_tokens);
+            env->ThrowNew(exception, error_msg);
+            return;
+        }
+        std::vector<llama_token> tokens(n_prompt_tokens);
+        const int actual_tokens = llama_tokenize(g_vocab, sanitized_cstr, sanitized_len, tokens.data(), tokens.size(), true, true);
+        if (actual_tokens < 0) {
+            llama_batch_free(batch);
+            jclass exception = env->FindClass("java/lang/RuntimeException");
+            env->ThrowNew(exception, "Failed to tokenize prompt");
+            return;
+        }
+        tokens.resize(actual_tokens);
+
+        make_room_for((int) tokens.size());
+
+        // Process prompt in batches to handle long inputs
+        int tokens_processed = 0;
+
+        while (tokens_processed < tokens.size() && !g_stop_flag) {
+            batch.n_tokens = 0;
+            int batch_size = std::min((int)tokens.size() - tokens_processed, max_batch_size);
+
+            for (int i = 0; i < batch_size; i++) {
+                batch.token[batch.n_tokens] = tokens[tokens_processed + i];
+                batch.pos[batch.n_tokens] = g_n_past + tokens_processed + i;
+                batch.n_seq_id[batch.n_tokens] = 1;
+                batch.seq_id[batch.n_tokens][0] = 0;
+                batch.logits[batch.n_tokens] = (tokens_processed + i == tokens.size() - 1);
+                batch.n_tokens++;
+            }
+
+            LOGI("Decoding batch: g_n_past=%d, batch_size=%d", g_n_past + tokens_processed, batch.n_tokens);
+            int decode_result = llama_decode(g_ctx, batch);
+            if (decode_result != 0) {
+                LOGE("❌ DECODE FAILED! Result code: %d", decode_result);
+                llama_batch_free(batch);
+                jclass exception = env->FindClass("java/lang/RuntimeException");
+                env->ThrowNew(exception, "Failed to decode prompt");
+                return;
+            }
+            tokens_processed += batch_size;
+        }
+
+        LOGI("✅ Decode successful! Processed %d total tokens", tokens_processed);
+
+        // Update position counter after decoding the whole prompt
+        g_n_past += tokens.size();
     }
-
-    LOGI("✅ Decode successful! Processed %d total tokens", tokens_processed);
-
-    // Update position counter after decoding the whole prompt
-    g_n_past += tokens.size();
 
     // Create sampler chain with all parameters
     if (g_sampler) {
@@ -609,7 +985,14 @@ Java_com_write4me_llama_1flutter_1android_LlamaFlutterAndroidPlugin_nativeStop(
 extern "C" JNIEXPORT void JNICALL
 Java_com_write4me_llama_1flutter_1android_LlamaFlutterAndroidPlugin_nativeFreeModel(
     JNIEnv* env, jobject thiz) {
-    
+
+    // Raise the flag before queueing on the mutex, so a generation in flight
+    // unwinds at its next batch instead of making this wait out the whole
+    // prompt. Ordering matters: lock first and the two would deadlock the
+    // caller for the length of a full prefill.
+    g_stop_flag = true;
+    std::lock_guard<std::mutex> ctx_lock(g_ctx_mutex);
+
     if (g_sampler) {
         llama_sampler_free(g_sampler);
         g_sampler = nullptr;
@@ -618,6 +1001,11 @@ Java_com_write4me_llama_1flutter_1android_LlamaFlutterAndroidPlugin_nativeFreeMo
         llama_free(g_ctx);
         g_ctx = nullptr;
     }
+    if (g_mtmd) {
+        mtmd_free(g_mtmd);
+        g_mtmd = nullptr;
+    }
+    g_pending_media.clear();
     if (g_model) {
         llama_model_free(g_model);
         g_model = nullptr;

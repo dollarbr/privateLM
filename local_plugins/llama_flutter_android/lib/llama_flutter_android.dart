@@ -21,3 +21,4 @@ library;
 export 'src/llama_controller.dart';
 export 'src/llama_api.dart' show ModelConfig, GenerateRequest, ChatMessage, ChatRequest, ContextInfo, GpuInfo, LlamaHostApi;
 export 'src/generation_config.dart';
+export 'src/llama_multimodal.dart';

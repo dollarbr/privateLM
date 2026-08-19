@@ -6,10 +6,12 @@ import android.content.Intent
 import android.util.Log
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.engine.plugins.FlutterPlugin
+import io.flutter.plugin.common.MethodCall
+import io.flutter.plugin.common.MethodChannel
 import kotlinx.coroutines.*
 import java.util.concurrent.atomic.AtomicBoolean
 
-class LlamaFlutterAndroidPlugin : FlutterPlugin, LlamaHostApi {
+class LlamaFlutterAndroidPlugin : FlutterPlugin, LlamaHostApi, MethodChannel.MethodCallHandler {
     private lateinit var context: Context
     private lateinit var flutterApi: LlamaFlutterApi
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -18,9 +20,17 @@ class LlamaFlutterAndroidPlugin : FlutterPlugin, LlamaHostApi {
     private val isStopping = AtomicBoolean(false)
     private var currentModelPath: String? = null
     private var nativeLoadError: Throwable? = null
+    private var nativeLoaded = false
+
+    // The multimodal calls ride a plain MethodChannel rather than the Pigeon
+    // API: the schema that generated LlamaHostApi is not in the repository, so
+    // adding fields there would mean reconstructing it. Loading a projector
+    // and queueing media is a small, self-contained surface anyway.
+    private var mtmdChannel: MethodChannel? = null
 
     companion object {
         private const val TAG = "LlamaFlutterPlugin"
+        private const val MTMD_CHANNEL = "llama_flutter_android/mtmd"
     }
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
@@ -28,14 +38,96 @@ class LlamaFlutterAndroidPlugin : FlutterPlugin, LlamaHostApi {
         context = binding.applicationContext
         flutterApi = LlamaFlutterApi(binding.binaryMessenger)
         LlamaHostApi.setUp(binding.binaryMessenger, this)
+        mtmdChannel = MethodChannel(binding.binaryMessenger, MTMD_CHANNEL).also {
+            it.setMethodCallHandler(this)
+        }
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        // scope.cancel() cannot interrupt nativeGenerate: it is a blocking JNI
+        // call with no suspension point to cancel at. Raise the native stop
+        // flag first so a generation in flight actually unwinds, then free --
+        // nativeFreeModel waits for it rather than pulling the context out
+        // from under a running decode.
+        if (nativeLoaded) {
+            isStopping.set(true)
+            nativeStop()
+        }
         scope.cancel()
         if (isModelLoaded.get()) {
             nativeFreeModel()
         }
         LlamaHostApi.setUp(binding.binaryMessenger, null)
+        mtmdChannel?.setMethodCallHandler(null)
+        mtmdChannel = null
+    }
+
+    override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
+        when (call.method) {
+            "mediaMarker" -> {
+                ensureNativeLoaded()?.let {
+                    result.error("NATIVE_LOAD", it.message, null); return
+                }
+                result.success(nativeMediaMarker())
+            }
+
+            // Hand over whatever ggml/llama.cpp has logged since the last
+            // call. Empty before the library is loaded, which is not an
+            // error: the poller starts before the first model does.
+            "drainNativeLog" -> {
+                // Deliberately not ensureNativeLoaded(): polling for logs
+                // must not be what maps libllama_jni and its Vulkan backend
+                // into a process that has not asked for inference yet.
+                if (!nativeLoaded) {
+                    result.success(emptyList<String>()); return
+                }
+                result.success(nativeDrainLog().toList())
+            }
+
+            "loadMmproj" -> {
+                val path = call.argument<String>("path")
+                if (path.isNullOrEmpty()) {
+                    result.error("BAD_ARGS", "path is required", null); return
+                }
+                if (!isModelLoaded.get()) {
+                    result.error("NO_MODEL", "Load the model before its projector", null)
+                    return
+                }
+                val useGpu = call.argument<Boolean>("useGpu") ?: true
+                val nThreads = call.argument<Int>("nThreads") ?: 4
+                scope.launch {
+                    // Loading a projector reads a few hundred MB off disk and
+                    // builds a graph; keep it off the platform thread.
+                    val caps = nativeLoadMmproj(path, useGpu, nThreads)
+                    withContext(Dispatchers.Main) {
+                        if (caps < 0) {
+                            result.error("MMPROJ_LOAD", "Failed to load projector: $path", null)
+                        } else {
+                            result.success(mapOf(
+                                "vision" to (caps and 1 != 0),
+                                "audio" to (caps and 2 != 0),
+                                "audioSampleRate" to nativeAudioSampleRate(),
+                            ))
+                        }
+                    }
+                }
+            }
+
+            "freeMmproj" -> {
+                if (isModelLoaded.get()) nativeFreeMmproj()
+                result.success(null)
+            }
+
+            "setMedia" -> {
+                if (!isModelLoaded.get()) {
+                    result.error("NO_MODEL", "No model loaded", null); return
+                }
+                nativeSetMedia((call.argument<List<String>>("paths") ?: emptyList()).toTypedArray())
+                result.success(null)
+            }
+
+            else -> result.notImplemented()
+        }
     }
 
     override fun loadModel(config: ModelConfig, callback: (Result<Unit>) -> Unit) {
@@ -388,6 +480,7 @@ class LlamaFlutterAndroidPlugin : FlutterPlugin, LlamaHostApi {
 
         return try {
             System.loadLibrary("llama_jni")
+            nativeLoaded = true
             null
         } catch (t: Throwable) {
             nativeLoadError = t
@@ -453,5 +546,11 @@ class LlamaFlutterAndroidPlugin : FlutterPlugin, LlamaHostApi {
     private external fun nativeClearContext()
     private external fun nativeSetSystemPromptLength(length: Int)
     private external fun nativeDetectGpu(outStats: LongArray): String?
+    private external fun nativeMediaMarker(): String
+    private external fun nativeDrainLog(): Array<String>
+    private external fun nativeLoadMmproj(path: String, useGpu: Boolean, nThreads: Int): Int
+    private external fun nativeFreeMmproj()
+    private external fun nativeAudioSampleRate(): Int
+    private external fun nativeSetMedia(paths: Array<String>)
     // outStats[0] = vulkanApiVersion, outStats[1] = deviceLocalMemoryBytes
 }
