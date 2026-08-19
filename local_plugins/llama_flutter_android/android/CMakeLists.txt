@@ -11,9 +11,26 @@ set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-z,max-page-size=16384
 set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-z,max-page-size=16384")
 
 # ARM64 optimizations
+#
+# EXPERIMENT -- see the note below before shipping this.
+#
+# This was -march=armv8-a+crc, the 2013 baseline, and because it lands in the
+# global CMAKE_C_FLAGS every one of ggml's translation units got it: a build
+# log check found -march=armv8-a+crc on all 358 compile commands and nothing
+# else, so GGML_DOTPROD below never produced a flag. That compiles out the
+# dotprod and fp16 kernels ggml uses for quantized matmul, which is most of
+# what a ViT encode and a prompt prefill do.
+#
+# The test device (Dimensity 7300, Cortex-A78) reports asimddp, fphp and
+# asimdhp in /proc/cpuinfo, so the silicon has both and the binary was not
+# asking for either. No i8mm or sve on ARMv8.2, so those stay out.
+#
+# CAUTION: armv8.2-a is a hard floor -- an ARMv8.0 device (pre-2017) gets
+# SIGILL, not a slow path. Shipping this needs ggml's runtime dispatch
+# (GGML_CPU_ALL_VARIANTS + GGML_BACKEND_DL) instead of a raised baseline.
 if(ANDROID_ABI STREQUAL "arm64-v8a")
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -march=armv8-a+crc")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=armv8-a+crc")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -march=armv8.2-a+crc+dotprod+fp16")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=armv8.2-a+crc+dotprod+fp16")
 endif()
 
 # llama.cpp options
@@ -76,6 +93,43 @@ if(ANDROID)
     endforeach()
 endif()
 
+# --- libmtmd: multimodal (vision + audio) input for GGUF models ---------------
+#
+# Vendored from upstream tools/mtmd at commit 4fbdabdc6, which is the revision
+# the llama.cpp copy under src/main/cpp/llama.cpp matches. The target is
+# declared here rather than via add_subdirectory because upstream's CMakeLists
+# also builds llama-mtmd-cli and install() rules that make no sense in an .apk.
+#
+# mtmd must NOT link against common -- upstream enforces that with a
+# FATAL_ERROR, since mtmd is a public library and common is not.
+set(MTMD_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/main/cpp/llama.cpp/tools/mtmd)
+
+file(GLOB MTMD_MODEL_SOURCES ${MTMD_DIR}/models/*.cpp)
+
+add_library(mtmd STATIC
+    ${MTMD_DIR}/mtmd.cpp
+    ${MTMD_DIR}/mtmd-audio.cpp
+    ${MTMD_DIR}/mtmd-image.cpp
+    ${MTMD_DIR}/mtmd-helper.cpp
+    ${MTMD_DIR}/clip.cpp
+    ${MTMD_MODEL_SOURCES}
+)
+
+target_link_libraries(mtmd PUBLIC ggml llama PRIVATE c++_shared)
+
+target_include_directories(mtmd PUBLIC ${MTMD_DIR})
+target_include_directories(mtmd PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/main/cpp/llama.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/main/cpp/llama.cpp/vendor
+)
+target_compile_features(mtmd PRIVATE cxx_std_17)
+
+# Static library folded into a shared one: without -fPIC the link fails on arm64.
+set_target_properties(mtmd PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# stb_image.h and miniaudio.h are header-only C and trip this warning wholesale.
+target_compile_options(mtmd PRIVATE -Wno-cast-qual)
+
 # JNI wrapper library - simplified without common library
 add_library(llama_jni SHARED
     src/main/cpp/jni_wrapper.cpp
@@ -83,6 +137,7 @@ add_library(llama_jni SHARED
 
 target_link_libraries(llama_jni
     llama
+    mtmd
     c++_shared
     android
     log
@@ -91,4 +146,5 @@ target_link_libraries(llama_jni
 target_include_directories(llama_jni PRIVATE
     src/main/cpp/llama.cpp/include
     src/main/cpp/llama.cpp/ggml/include
+    src/main/cpp/llama.cpp/tools/mtmd
 )
