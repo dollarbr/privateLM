@@ -384,6 +384,25 @@ Java_com_write4me_llama_1flutter_1android_LlamaFlutterAndroidPlugin_nativeLoadMo
     llama_model_params model_params = llama_model_default_params();
     model_params.n_gpu_layers = n_gpu_layers;
 
+    // "CPU" in Settings has to mean the CPU is the only device the model knows
+    // about, not merely that no layer is offloaded to the other one.
+    //
+    // With devices left at NULL llama.cpp enumerates every backend it was built
+    // with, so Vulkan joined ggml_backend_sched even at n_gpu_layers = 0.
+    // Zeroing op_offload stopped the weights being shipped to the GPU per op,
+    // but the second backend stayed in the scheduler and every batched decode
+    // still paid to re-plan and re-allocate across it. Measured on this device:
+    // a batched decode cost ~5.5 s before the first token of work, on top of
+    // ~25 ms/token -- 55 tokens took 7.1 s, 244 took 12.1 s. Single-token
+    // decode, whose graph shape never changes, cost 133 ms and showed none of
+    // it. An empty (NULL-terminated) device list leaves model->devices empty,
+    // which is the documented way to ask for CPU only.
+    static ggml_backend_dev_t cpu_only[] = { nullptr };
+    if (n_gpu_layers == 0) {
+        model_params.devices = cpu_only;
+        LOGI("Device list restricted to the CPU");
+    }
+
     llama_log_set(androidLlamaLog, nullptr);
     {
         std::lock_guard<std::mutex> lock(g_load_log_mutex);
