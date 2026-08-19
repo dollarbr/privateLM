@@ -9,8 +9,10 @@
 #include <chrono>
 #include <mutex>
 #include <deque>
+#include <dlfcn.h>
 #include <android/log.h>
 #include "llama.cpp/include/llama.h"
+#include "llama.cpp/ggml/include/ggml-backend.h"
 #include "mtmd.h"
 #include "mtmd-helper.h"
 #define LOG_TAG "LlamaJNI"
@@ -279,6 +281,73 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
     return JNI_VERSION_1_6;
 }
 
+// Register the backends, choosing the CPU one the silicon can actually run.
+//
+// GGML_CPU_ALL_VARIANTS builds libggml-cpu-android_*.so once per ARM feature
+// set. ggml's own picker, ggml_backend_load_all(), finds them by listing a
+// directory, which is no use here: with the default packaging the libraries
+// are never unpacked out of the APK, so there is no directory to list. Android
+// resolves a bare soname through the app's library path either way, unpacked
+// or not, so the candidates are named rather than discovered.
+//
+// The choice itself is still ggml's. Each variant exports ggml_backend_score(),
+// which reads getauxval(AT_HWCAP) and returns 0 when the CPU is missing any
+// feature that variant was compiled for -- so a variant that would SIGILL
+// scores zero and is never registered, and the richest usable one wins. That
+// is the whole reason the ARM baseline can stay at the NDK default.
+static void loadBackendsOnce() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        static const char* const cpu_variants[] = {
+            "libggml-cpu-android_armv8.0_1.so",
+            "libggml-cpu-android_armv8.2_1.so",
+            "libggml-cpu-android_armv8.2_2.so",
+            "libggml-cpu-android_armv8.6_1.so",
+            "libggml-cpu-android_armv9.0_1.so",
+            "libggml-cpu-android_armv9.2_1.so",
+            "libggml-cpu-android_armv9.2_2.so",
+        };
+
+        const char* best = nullptr;
+        int best_score = 0;
+        for (const char* name : cpu_variants) {
+            void* handle = dlopen(name, RTLD_NOW | RTLD_LOCAL);
+            if (!handle) {
+                LOGI("CPU variant %s not present: %s", name, dlerror());
+                continue;
+            }
+            auto score_fn = (int (*)(void)) dlsym(handle, "ggml_backend_score");
+            const int score = score_fn ? score_fn() : 0;
+            LOGI("CPU variant %s scores %d", name, score);
+            if (score > best_score) {
+                best_score = score;
+                best = name;
+            }
+            dlclose(handle);
+        }
+
+        // Fall back to the single-variant name so a build without
+        // GGML_CPU_ALL_VARIANTS, or an architecture with no variants defined,
+        // still gets a CPU backend instead of none.
+        if (!best) {
+            best = "libggml-cpu.so";
+            LOGI("No scored CPU variant; falling back to %s", best);
+        }
+        if (!ggml_backend_load(best)) {
+            LOGE("Failed to register the CPU backend from %s", best);
+        } else {
+            LOGI("CPU backend: %s (score %d)", best, best_score);
+        }
+
+        // Loaded unconditionally so nativeDetectGpu can report the GPU even
+        // when the user has chosen CPU. Whether a model uses it is decided per
+        // load by n_gpu_layers and model_params.devices, not here.
+        if (!ggml_backend_load("libggml-vulkan.so")) {
+            LOGI("Vulkan backend unavailable on this device");
+        }
+    });
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_write4me_llama_1flutter_1android_LlamaFlutterAndroidPlugin_nativeDetectGpu(
         JNIEnv* env, jobject /* this */, jlongArray outStats) {
@@ -291,10 +360,9 @@ Java_com_write4me_llama_1flutter_1android_LlamaFlutterAndroidPlugin_nativeDetect
     // instance of our own: the backend that will run the layers is the only
     // authority on whether the offload is possible, and a device ggml did not
     // register is one llama_model_load could not use even if Vulkan answered.
-    // Backends may be dynamically loaded shared objects rather than statically
-    // registered; without this the registry can be empty on the first call and
-    // only fills in later, when llama_model_load does it for us.
-    ggml_backend_load_all();
+    // Backends are dynamically loaded shared objects rather than statically
+    // registered, so without this the registry is empty and no device is found.
+    loadBackendsOnce();
 
     const size_t n_devices = ggml_backend_dev_count();
     LOGI("nativeDetectGpu: %zu device(s) registered", n_devices);
@@ -381,6 +449,8 @@ Java_com_write4me_llama_1flutter_1android_LlamaFlutterAndroidPlugin_nativeLoadMo
     g_stop_flag = false;
 
     // Model parameters
+    loadBackendsOnce();
+
     llama_model_params model_params = llama_model_default_params();
     model_params.n_gpu_layers = n_gpu_layers;
 

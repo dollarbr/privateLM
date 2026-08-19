@@ -11,27 +11,24 @@ set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-z,max-page-size=16384
 set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-z,max-page-size=16384")
 
 # ARM64 optimizations
+# Runtime CPU dispatch, not a raised compile-time baseline.
 #
-# EXPERIMENT -- see the note below before shipping this.
+# The floor used to be -march=armv8-a+crc, the 2013 baseline, and because it
+# landed in the global CMAKE_C_FLAGS every one of ggml's translation units got
+# it -- all 358 compile commands, with nothing else, so GGML_DOTPROD never
+# produced a flag. That compiles out the dotprod and fp16 kernels ggml uses for
+# quantized matmul, which is most of what a prefill and a ViT encode do. Raising
+# the global floor to armv8.2 instead was worth 1.9x on decode, but it is a hard
+# floor: an ARMv8.0 device gets SIGILL, not a slow path, so it could not ship.
 #
-# This was -march=armv8-a+crc, the 2013 baseline, and because it lands in the
-# global CMAKE_C_FLAGS every one of ggml's translation units got it: a build
-# log check found -march=armv8-a+crc on all 358 compile commands and nothing
-# else, so GGML_DOTPROD below never produced a flag. That compiles out the
-# dotprod and fp16 kernels ggml uses for quantized matmul, which is most of
-# what a ViT encode and a prompt prefill do.
-#
-# The test device (Dimensity 7300, Cortex-A78) reports asimddp, fphp and
-# asimdhp in /proc/cpuinfo, so the silicon has both and the binary was not
-# asking for either. No i8mm or sve on ARMv8.2, so those stay out.
-#
-# CAUTION: armv8.2-a is a hard floor -- an ARMv8.0 device (pre-2017) gets
-# SIGILL, not a slow path. Shipping this needs ggml's runtime dispatch
-# (GGML_CPU_ALL_VARIANTS + GGML_BACKEND_DL) instead of a raised baseline.
-if(ANDROID_ABI STREQUAL "arm64-v8a")
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=armv8.2-a+crc+dotprod+fp16")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=armv8.2-a+crc+dotprod+fp16")
-endif()
+# GGML_CPU_ALL_VARIANTS builds the CPU backend once per feature set as separate
+# shared objects (~800 KB each, seven of them for Android) and picks one at run
+# time. ggml/src/ggml-cpu/arch/arm/cpu-feats.cpp scores each against getauxval's
+# AT_HWCAP and returns 0 for any variant the silicon cannot run, so the best
+# usable one wins and an unusable one is never registered. The global -march
+# stays at the NDK default; each variant target sets its own.
+set(GGML_BACKEND_DL ON CACHE BOOL "Load ggml backends as shared objects" FORCE)
+set(GGML_CPU_ALL_VARIANTS ON CACHE BOOL "Build one CPU backend per feature set" FORCE)
 
 # The Android Gradle plugin builds the native side as RelWithDebInfo, and CMake
 # appends CMAKE_<LANG>_FLAGS_<CONFIG> *after* CMAKE_<LANG>_FLAGS. An -O3 in the
@@ -45,8 +42,6 @@ foreach(cfg RELEASE RELWITHDEBINFO MINSIZEREL)
 endforeach()
 
 # llama.cpp options
-set(GGML_CPU_AARCH64 ON CACHE BOOL "Enable ARM64 support")
-set(GGML_DOTPROD ON CACHE BOOL "Enable ARM NEON dot product")
 # ggml-vulkan.cpp includes <vulkan/vulkan.hpp> and <spirv/unified1/spirv.hpp>.
 # The NDK sysroot carries the Vulkan *C* headers only (no vulkan.hpp) and no
 # SPIR-V headers at all, and taking the C++ ones from whatever the host distro
