@@ -877,6 +877,10 @@ Java_com_write4me_llama_1flutter_1android_LlamaFlutterAndroidPlugin_nativeGenera
             eval_rc = mtmd_helper_eval_chunk_single(
                 g_mtmd, g_ctx, chunk, new_n_past, /* seq_id */ 0,
                 max_batch_size, /* logits_last */ i + 1 == n_chunks, &new_n_past);
+            // Stop the clock only once the backend has actually finished. Same
+            // reason as the text prefill below: without this the GPU's share of
+            // a chunk gets billed to whatever runs next.
+            llama_synchronize(g_ctx);
             const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - t0).count();
             LOGI("Chunk %zu/%zu: type=%s, n_tokens=%zu, %lld ms",
@@ -927,6 +931,7 @@ Java_com_write4me_llama_1flutter_1android_LlamaFlutterAndroidPlugin_nativeGenera
 
         // Process prompt in batches to handle long inputs
         int tokens_processed = 0;
+        const auto t_prefill = std::chrono::steady_clock::now();
 
         while (tokens_processed < tokens.size() && !g_stop_flag) {
             batch.n_tokens = 0;
@@ -953,7 +958,20 @@ Java_com_write4me_llama_1flutter_1android_LlamaFlutterAndroidPlugin_nativeGenera
             tokens_processed += batch_size;
         }
 
-        LOGI("✅ Decode successful! Processed %d total tokens", tokens_processed);
+        // llama_decode only enqueues work on an asynchronous backend; it
+        // returns before the GPU has run it, so timing the loop alone measured
+        // the submit rather than the prefill. On Vulkan here a 48-token prompt
+        // "decoded" in 196 ms and then cost 10.7 s inside the first
+        // llama_sampler_sample, which is the call that forces the sync -- the
+        // prefill was being billed to sampling and the log read as though the
+        // GPU were fast. Synchronise before stopping the clock. On the CPU
+        // backend this is work already done, so the number does not move.
+        llama_synchronize(g_ctx);
+        const auto prefill_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t_prefill).count();
+        LOGI("✅ Prefill done: %d tokens in %lld ms (%.1f tok/s)",
+             tokens_processed, (long long) prefill_ms,
+             prefill_ms > 0 ? tokens_processed * 1000.0 / prefill_ms : 0.0);
 
         // Update position counter after decoding the whole prompt
         g_n_past += tokens.size();
