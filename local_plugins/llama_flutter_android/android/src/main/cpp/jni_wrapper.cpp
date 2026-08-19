@@ -293,6 +293,23 @@ Java_com_write4me_llama_1flutter_1android_LlamaFlutterAndroidPlugin_nativeLoadMo
     // Memory optimization: reduce memory usage by limiting batch processing
     ctx_params.n_batch = 512;  // Process smaller batches to reduce memory spikes
 
+    // With the weights in system RAM, let them be computed there too.
+    //
+    // ggml's scheduler has a second, separate offload path from n_gpu_layers:
+    // ggml_backend_sched_backend_id_from_cur() hands any op whose batch is at
+    // least GGML_OP_OFFLOAD_MIN_BATCH (32) to a higher-priority backend that
+    // claims it, even when the weights live on the host. Registering Vulkan is
+    // enough to trigger it, so "CPU" in Settings never was CPU: decode (batch 1)
+    // stayed put, but every prefill (batch 244 measured) shipped each layer's
+    // weights over the bus to the GPU and back, once per op. Measured on a
+    // Mali-G615: 244 text tokens took 63.8s to prefill, 3.8 tok/s -- slower than
+    // this build decodes (4.3 tok/s), when prefill should beat decode severalfold.
+    // It also pins the GPU, which is why generating froze the whole UI.
+    if (n_gpu_layers == 0) {
+        ctx_params.op_offload = false;
+        LOGI("op_offload disabled: weights are on the host");
+    }
+
     // Create context (using new API)
     g_ctx = llama_init_from_model(g_model, ctx_params);
     if (!g_ctx) {
