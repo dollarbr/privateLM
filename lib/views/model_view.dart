@@ -29,6 +29,15 @@ class ModelView extends GetView<ModelController> {
             return Row(
               mainAxisSize: MainAxisSize.min,
               children: [
+                // Search lives here and not only in the empty state: that is
+                // where it used to be, so it vanished the moment the first
+                // model was added — exactly when browsing for a second one
+                // starts to make sense.
+                IconButton(
+                  icon: const Icon(Icons.search),
+                  tooltip: 'Search Hugging Face',
+                  onPressed: () => HfSearchSheet.show(context),
+                ),
                 IconButton(
                   icon: const Icon(Icons.add_link),
                   tooltip: 'Add Model URL',
