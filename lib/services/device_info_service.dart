@@ -19,6 +19,15 @@ class DeviceInfoService extends GetxService {
   int get maxSafeContextSize => _tierConfig['maxContextSize']!;
   int get maxSafeTokens => _tierConfig['maxSafeTokens']!;
 
+  /// The largest model file worth offering, in bytes.
+  ///
+  /// Not total RAM: Android's low-memory killer takes the app long before the
+  /// last byte, and the weights are only part of the footprint — KV cache,
+  /// the projector on a multimodal model and the UI itself all sit alongside.
+  /// 60% of physical RAM is the line that has held on the 12 GB test device.
+  int get maxModelBytes =>
+      (totalRamGB.value * 0.6 * 1024 * 1024 * 1024).round();
+
   Map<String, int> get _tierConfig {
     final ram = totalRamGB.value;
     if (ram <= 4) {

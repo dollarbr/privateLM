@@ -11,12 +11,17 @@ class _CannedAdapter implements HttpClientAdapter {
 
   final Object body;
 
+  /// The last request served, so a test can assert on what was asked for and
+  /// not only on what came back.
+  RequestOptions? lastRequest;
+
   @override
   void close({bool force = false}) {}
 
   @override
   Future<ResponseBody> fetch(RequestOptions options,
       Stream<Uint8List>? requestStream, Future<void>? cancelFuture) async {
+    lastRequest = options;
     return ResponseBody.fromString(
       jsonEncode(body),
       200,
@@ -27,15 +32,104 @@ class _CannedAdapter implements HttpClientAdapter {
   }
 }
 
+late _CannedAdapter _adapter;
+
 HfSearchService _serving(Object body) {
-  final dio = Dio()..httpClientAdapter = _CannedAdapter(body);
+  _adapter = _CannedAdapter(body);
+  final dio = Dio()..httpClientAdapter = _adapter;
   return HfSearchService(dio: dio);
 }
 
 void main() {
-  test('an empty query does not hit the network', () async {
+  test('an empty query browses the index instead of returning nothing',
+      () async {
+    final service = _serving([
+      {'id': 'unsloth/Qwen3-GGUF', 'downloads': 5},
+    ]);
+
+    expect((await service.browseRepos()).map((r) => r.id),
+        ['unsloth/Qwen3-GGUF']);
+    // No `search` key at all, rather than an empty one the hub would honour.
+    expect(_adapter.lastRequest!.queryParameters.containsKey('search'), isFalse);
+  });
+
+  test('filters become the query the hub expects', () async {
     final service = _serving([]);
-    expect(await service.searchRepos('   '), isEmpty);
+
+    await service.browseRepos(
+      query: 'qwen',
+      filters: const HfFilters(
+        format: HfFormat.gguf,
+        author: 'bartowski',
+        minParamsB: 1,
+        maxParamsB: 4,
+        tags: {'moe', '4-bit'},
+        pipelineTag: 'image-text-to-text',
+      ),
+      skip: 60,
+    );
+
+    final q = _adapter.lastRequest!.queryParameters;
+    expect(q['filter'], ['gguf', 'moe', '4-bit']);
+    expect(q['search'], 'qwen');
+    expect(q['author'], 'bartowski');
+    expect(q['pipeline_tag'], 'image-text-to-text');
+    expect(q['num_parameters'], 'min:1B,max:4B');
+    expect(q['skip'], 60);
+  });
+
+  test('an unbounded parameter range is left off the query', () async {
+    final service = _serving([]);
+    await service.browseRepos();
+    expect(_adapter.lastRequest!.queryParameters.containsKey('num_parameters'),
+        isFalse);
+    expect(const HfFilters(maxParamsB: 4).paramRangeQuery, 'min:0B,max:4B');
+  });
+
+  test('only pipelines the app can load count as runnable', () {
+    expect(HfSearchService.isRunnable(''), isTrue);
+    expect(HfSearchService.isRunnable('text-generation'), isTrue);
+    expect(HfSearchService.isRunnable('image-text-to-text'), isTrue);
+    expect(HfSearchService.isRunnable('feature-extraction'), isFalse);
+    expect(HfSearchService.isRunnable('automatic-speech-recognition'), isFalse);
+    expect(HfSearchService.isRunnable('text-to-speech'), isFalse);
+  });
+
+  test('both runtimes are browsed when no format is picked', () async {
+    final service = _serving([
+      {'id': 'unsloth/Qwen3-GGUF', 'downloads': 5},
+    ]);
+
+    final repos = await service.browseRepos();
+
+    // One query per format, merged and deduplicated by id.
+    expect(repos.map((r) => r.id), ['unsloth/Qwen3-GGUF']);
+    expect(_adapter.lastRequest!.queryParameters['filter'],
+        anyOf(equals(['gguf']), equals(['litert-lm'])));
+  });
+
+  test('a LiteRT build for another vendor is not offered', () async {
+    final service = _serving([
+      {'type': 'file', 'path': 'gemma.litertlm', 'size': 300},
+      {'type': 'file', 'path': 'gemma_Google_Tensor_G5.litertlm', 'size': 400},
+      {'type': 'file', 'path': 'gemma_qualcomm_sm8750.litertlm', 'size': 500},
+      {'type': 'file', 'path': 'gemma-web.litertlm', 'size': 200},
+      {'type': 'file', 'path': 'mmproj-gemma.gguf', 'size': 50},
+    ]);
+
+    final files = await service.listModelFiles('litert-community/gemma');
+
+    expect(files.map((f) => f.filename), ['gemma.litertlm']);
+    // The encoders live inside a .litertlm, so a stray mmproj is not paired.
+    expect(files.single.projectors, isEmpty);
+    expect(files.single.isLiteRt, isTrue);
+  });
+
+  test('the filter badge ignores the on-by-default device fit', () {
+    expect(const HfFilters().activeCount, 0);
+    expect(const HfFilters(fitsDevice: false).activeCount, 0);
+    expect(const HfFilters(author: 'unsloth', tags: {'moe'}).activeCount, 2);
+    expect(const HfFilters(format: HfFormat.gguf).activeCount, 1);
   });
 
   test('search keeps id, downloads and likes', () async {
@@ -45,7 +139,7 @@ void main() {
       {'downloads': 99}, // no id at all — must be dropped
     ]);
 
-    final repos = await service.searchRepos('nemotron');
+    final repos = await service.browseRepos(query: 'nemotron');
 
     expect(repos.map((r) => r.id),
         ['nvidia/Nemotron-Flash-3B-GGUF', 'other/repo-GGUF']);
@@ -66,7 +160,7 @@ void main() {
       {'type': 'directory', 'path': 'subdir'},
     ]);
 
-    final files = await service.listGgufFiles('owner/repo');
+    final files = await service.listModelFiles('owner/repo');
 
     expect(files.map((f) => f.filename), ['model-Q4_K_M.gguf', 'model-Q8_0.gguf']);
 
@@ -90,7 +184,7 @@ void main() {
       {'type': 'file', 'path': 'plain-Q4_K_M.gguf', 'size': 400},
     ]);
 
-    final files = await service.listGgufFiles('owner/repo');
+    final files = await service.listModelFiles('owner/repo');
 
     expect(files.single.isMultimodal, isFalse);
     expect(files.single.projectors, isEmpty);
